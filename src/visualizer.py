@@ -458,7 +458,7 @@ class WeatherVisualizer:
         # 6. 月度MAE分解
         ax = axes[2, 1]
         if dates is not None and len(dates) == len(y_true):
-            months = pd.to_datetime(dates).month
+            months = pd.to_datetime(dates).dt.month
             monthly_mae = pd.DataFrame({"month": months, "error": np.abs(y_true - y_pred)})
             monthly = monthly_mae.groupby("month")["error"].mean()
             ax.bar(monthly.index, monthly.values, color="steelblue", alpha=0.7)
