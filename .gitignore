@@ -1,0 +1,45 @@
+# 数据文件
+data/raw/
+data/processed/
+data/models/*.pkl
+data/predictions/
+data/reports/*.png
+
+# 保留优化结果和对比图
+!data/models/optimization_results.json
+!data/reports/optimization_comparison.png
+
+# 日志
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# MCP配置
+.mcp.json
+.claude/
