@@ -85,6 +85,28 @@ class FeatureEngineer:
         return df
 
     # =========================================================================
+    # 年同比特征
+    # =========================================================================
+    @staticmethod
+    def add_yoy_features(df: pd.DataFrame, time_col: str = "time") -> pd.DataFrame:
+        """
+        添加年同比特征（去年同日温度/降水的滞后参考）
+
+        帮助模型学习气候基线偏移。
+        """
+        df = df.copy()
+        df = df.sort_values(time_col).reset_index(drop=True)
+
+        for col in ["temperature_2m_max", "precipitation_sum"]:
+            if col in df.columns:
+                # 365-day lag ≈ same day last year
+                df[f"{col}_yoy"] = df[col].shift(365)
+                # difference from last year
+                df[f"{col}_yoy_diff"] = df[col] - df[col].shift(365)
+
+        return df
+
+    # =========================================================================
     # 上海特色特征
     # =========================================================================
     @staticmethod
@@ -474,6 +496,10 @@ class FeatureEngineer:
         df = self.add_shanghai_features(df)
         logger.info("上海特色特征添加完成")
 
+        # 3.5. 年同比特征
+        df = self.add_yoy_features(df)
+        logger.info("年同比特征添加完成")
+
         # 4. 滞后特征
         df = self.add_lag_features(df)
         logger.info("滞后特征添加完成")
@@ -540,6 +566,7 @@ class FeatureEngineer:
         base = self.add_temporal_features(base)
         base = self.add_physical_features(base)
         base = self.add_shanghai_features(base)
+        base = self.add_yoy_features(base)
         base = self.add_lag_features(base)
         base = self.add_rolling_features(base)
 

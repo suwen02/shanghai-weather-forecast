@@ -68,8 +68,9 @@ CITY_STATIONS: List[WeatherStation] = [
     WeatherStation("jing_an", "静安", "city_center", 31.2285, 121.4480),
 ]
 
-# 周边城市 (14个站点)
+# 周边城市 (22个站点 — 扩展至长三角全域)
 SURROUNDING_STATIONS: List[WeatherStation] = [
+    # 原有14站
     WeatherStation("kunshan", "昆山", "jiangsu_east", 31.3856, 120.9577),
     WeatherStation("taicang", "太仓", "jiangsu_east", 31.4576, 121.1309),
     WeatherStation("suzhou", "苏州", "jiangsu", 31.2990, 120.5853),
@@ -84,6 +85,15 @@ SURROUNDING_STATIONS: List[WeatherStation] = [
     WeatherStation("wuxi", "无锡", "jiangsu", 31.4906, 120.3119),
     WeatherStation("changzhou", "常州", "jiangsu", 31.8106, 119.9741),
     WeatherStation("huzhou", "湖州", "zhejiang", 30.8924, 120.0879),
+    # 新增8站 — 宁波/杭州/绍兴/盐城/泰州/温州/扬州/镇江
+    WeatherStation("ningbo", "宁波", "zhejiang_coast", 29.8683, 121.5440),
+    WeatherStation("hangzhou", "杭州", "zhejiang", 30.2741, 120.1551),
+    WeatherStation("shaoxing", "绍兴", "zhejiang", 30.0306, 120.5810),
+    WeatherStation("yancheng", "盐城", "jiangsu_north", 33.3476, 120.1637),
+    WeatherStation("taizhou_js", "泰州(苏)", "jiangsu", 32.4906, 119.9221),
+    WeatherStation("wenzhou", "温州", "zhejiang_south", 28.0006, 120.6722),
+    WeatherStation("yangzhou", "扬州", "jiangsu", 32.3947, 119.4137),
+    WeatherStation("zhenjiang", "镇江", "jiangsu", 32.1870, 119.4250),
 ]
 
 # 全部站点
@@ -93,7 +103,7 @@ ALL_STATIONS: List[WeatherStation] = CITY_STATIONS + SURROUNDING_STATIONS
 # Open-Meteo API 配置
 # =============================================================================
 
-# 确定性预报模型 (8个)
+# 确定性预报模型 (11个 — 新增MeteoFrance, KNMI, KMA)
 DETERMINISTIC_MODELS = [
     "cma_grapes_global",  # 中国气象局GRAPES全球模式（上海最相关）
     "ecmwf_ifs025",       # ECMWF IFS 0.25°（全球最佳）
@@ -102,6 +112,9 @@ DETERMINISTIC_MODELS = [
     "jma_seamless",       # 日本气象厅（东亚表现好）
     "gem_seamless",       # 加拿大GEM
     "ukmo_seamless",      # 英国气象局
+    "meteofrance_seamless",  # 法国气象局ARPEGE/AROME
+    "knmi_seamless",      # 荷兰KNMI HARMONIE
+    "kma_seamless",       # 韩国气象厅（东亚区域补充）
     "best_match",         # Open-Meteo自动选择最佳模型
 ]
 
@@ -159,14 +172,14 @@ HTTP_USER_AGENT = "ShanghaiWeatherML/1.0"
 class MLConfig:
     """机器学习配置参数"""
     # 训练数据
-    historical_years: int = 5              # 历史数据年数
-    station_historical_years: int = 3      # 站点历史数据年数
+    historical_years: int = 7              # 历史数据年数（扩展至7年以覆盖更多极端天气）
+    station_historical_years: int = 5      # 站点历史数据年数（扩展至5年）
     validation_days: int = 365             # 验证集天数（最近一年）
     calibration_fraction: float = 0.2      # 校准集比例
 
-    # 特征工程
-    lag_days: List[int] = field(default_factory=lambda: [1, 2, 3, 5, 7, 14])
-    rolling_windows: List[int] = field(default_factory=lambda: [3, 7, 14, 30])
+    # 特征工程（扩展滞后天数和滚动窗口）
+    lag_days: List[int] = field(default_factory=lambda: [1, 2, 3, 5, 7, 14, 21, 28])
+    rolling_windows: List[int] = field(default_factory=lambda: [3, 7, 14, 30, 60, 90])
 
     # 温度模型 - 分位数回归
     temp_quantiles: List[float] = field(
