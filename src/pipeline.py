@@ -34,9 +34,14 @@ from config.settings import (
 from collectors.open_meteo import OpenMeteoCollector, run_daily_collection, collect_training_history
 from collectors.cma_stations import CMAStationCollector, run_station_collection, collect_station_history
 from features.engineer import FeatureEngineer
+from features.prediction_frame import build_forecast_scaffold
 from models.temperature import TemperaturePredictor
 from models.precipitation import PrecipitationPredictor
 from models.calibration import CalibrationManager
+from src.realtime import (
+    RefreshStateStore, atomic_publish_json, build_short_term_forecast,
+    fetch_latest_snapshot, snapshot_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +200,11 @@ class WeatherPipeline:
     # =========================================================================
     # 步骤3: 每日预测
     # =========================================================================
-    def step3_daily_predict(self, target_date: Optional[date] = None) -> Dict:
+    def step3_daily_predict(
+        self,
+        target_date: Optional[date] = None,
+        realtime_snapshot: Optional[Dict] = None,
+    ) -> Dict:
         """
         执行每日预测
 
@@ -226,35 +235,41 @@ class WeatherPipeline:
         ens_df = self.collector.collect_ensemble_summary()
         station_df = self.station_collector.collect_station_forecasts()
 
-        # 获取近期历史（60天用于滞后/滚动特征）
+        # 短临快照使用 Open-Meteo 当前最新可用 best_match 数据。
+        if realtime_snapshot is None:
+            realtime_snapshot = fetch_latest_snapshot(self.collector)
+
+        # 最长滚动窗口已扩展到90天，预留120天确保滞后/滚动特征完整。
         logger.info("获取近期历史观测...")
-        recent_start = target_date - timedelta(days=60)
+        recent_start = target_date - timedelta(days=120)
         recent_end = target_date - timedelta(days=1)
         recent = self.collector.collect_historical_data(recent_start, recent_end)
         recent_daily = recent.get("daily", pd.DataFrame())
 
-        # 构建预测特征
+        # 先生成历史状态特征，再以未来 NWP 日期为主表构造真正的预测行。
         logger.info("构建预测特征...")
-        pred_features = self.engineer.build_prediction_features(
+        history_features = self.engineer.build_prediction_features(
             det_df, ens_df, station_df, recent_daily
+        )
+        consensus = self.engineer.build_model_consensus_features(det_df)
+        ens_features = self.engineer.build_ensemble_features(ens_df)
+        spatial = self.engineer.build_station_spatial_features(station_df)
+        pred_features = build_forecast_scaffold(
+            history_features, consensus, ens_features, spatial
         )
 
         if pred_features.empty:
-            logger.error("预测特征构建失败")
+            logger.error("预测特征构建失败：未得到未来NWP日期行")
             return {}
 
-        # 对齐特征列
+        # 历史状态列会携带到未来行，但时间/上海季节特征必须按目标日重算。
+        pred_features = self.engineer.add_temporal_features(pred_features)
+        pred_features = self.engineer.add_shanghai_features(pred_features)
         pred_features = self.engineer.impute_missing(pred_features, self.engineer.feature_cols)
 
-        # 生成预测日期
-        forecast_dates = [
-            (target_date + timedelta(days=i)).isoformat()
-            for i in range(ML_CONFIG.forecast_horizon)
-        ]
-
-        # 取最后N行作为预测输入
         n_pred = min(len(pred_features), ML_CONFIG.forecast_horizon)
-        X_pred = pred_features.tail(n_pred)
+        X_pred = pred_features.head(n_pred)
+        forecast_dates = pd.to_datetime(X_pred["time"]).dt.strftime("%Y-%m-%d").tolist()
 
         # 温度预测
         logger.info("生成温度预测...")
@@ -278,12 +293,45 @@ class WeatherPipeline:
             result.distribution_params["p_rain_occurrence"] = round(calibrated_p, 4)
             result.distribution_params["p_dry"] = round(1 - calibrated_p, 4)
 
-        # 保存预测结果
+        # 附加基于最新数据的48小时短临预报和新鲜度信息。
         output = self._format_predictions(temp_results, precip_results, target_date)
+        short_term = build_short_term_forecast(
+            realtime_snapshot, timezone=TIMEZONE, horizon_hours=48
+        )
+        output["data_as_of"] = short_term["data_as_of"]
+        output["data_age_minutes"] = short_term["data_age_minutes"]
+        output["is_stale"] = short_term["is_stale"]
+        output["short_term"] = short_term["hours"]
         self._save_predictions(output, target_date)
 
         logger.info(f"每日预测完成: {len(temp_results)}天温度 + {len(precip_results)}天降水")
         return output
+
+    def step4_realtime_refresh(self, force: bool = False) -> Dict:
+        """检查最新逐小时数据；仅在上游数据变化后重新生成完整预测。"""
+        logger.info("=== 步骤4: 实时刷新检查 ===")
+        snapshot = fetch_latest_snapshot(self.collector)
+        fingerprint = snapshot_fingerprint(snapshot)
+        state = RefreshStateStore(PREDICTIONS_DIR / ".refresh_state.json")
+        freshness = build_short_term_forecast(snapshot, timezone=TIMEZONE, horizon_hours=48)
+
+        if not force and not state.should_refresh(fingerprint):
+            logger.info("上游天气数据未变化，跳过完整预测")
+            return {
+                "updated": False,
+                "reason": "upstream_unchanged",
+                "data_as_of": freshness["data_as_of"],
+                "data_age_minutes": freshness["data_age_minutes"],
+                "is_stale": freshness["is_stale"],
+            }
+
+        prediction = self.step3_daily_predict(realtime_snapshot=snapshot)
+        if not prediction:
+            logger.error("实时刷新预测失败，不更新指纹状态")
+            return {"updated": False, "reason": "prediction_failed"}
+
+        state.mark_refreshed(fingerprint, prediction.get("generated_at", ""))
+        return {"updated": True, "prediction": prediction}
 
     def _load_models(self):
         """加载训练好的模型"""
@@ -332,14 +380,18 @@ class WeatherPipeline:
         return output
 
     def _save_predictions(self, output: Dict, report_date: date):
-        """保存预测结果JSON"""
+        """原子发布版本文件、当日兼容文件和latest.json。"""
         date_str = report_date.strftime("%Y%m%d")
-        pred_path = PREDICTIONS_DIR / f"predictions_{date_str}.json"
+        time_str = pd.Timestamp.now(tz=TIMEZONE).strftime("%H%M%S")
+        versioned_path = PREDICTIONS_DIR / f"predictions_{date_str}_{time_str}.json"
+        daily_path = PREDICTIONS_DIR / f"predictions_{date_str}.json"
+        latest_path = PREDICTIONS_DIR / "latest.json"
 
-        with open(pred_path, "w", encoding="utf-8") as f:
-            json.dump(output, f, ensure_ascii=False, indent=2)
-
-        logger.info(f"预测结果已保存: {pred_path}")
+        atomic_publish_json(output, versioned_path, latest_path)
+        atomic_publish_json(output, daily_path, latest_path)
+        logger.info(
+            f"预测结果已发布: {versioned_path}; latest={latest_path}"
+        )
 
     # =========================================================================
     # 运行模式
@@ -366,6 +418,10 @@ class WeatherPipeline:
 
         elif mode == "train":
             results["training"] = self.step2_train_models()
+        elif mode == "refresh":
+            results["refresh"] = self.step4_realtime_refresh(
+                force=kwargs.get("force", False),
+            )
 
         if mode in ("predict", "full"):
             results["prediction"] = self.step3_daily_predict(

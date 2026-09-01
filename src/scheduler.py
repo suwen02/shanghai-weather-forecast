@@ -16,10 +16,16 @@ crontab示例（CST时区）：
 """
 
 import sys
+import os
 import time
 import logging
 import argparse
 from datetime import datetime, date
+
+# 允许从项目根目录直接执行 ``python src/scheduler.py``。
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 import schedule
 
@@ -29,6 +35,7 @@ from config.settings import (
 )
 
 logger = logging.getLogger(__name__)
+REALTIME_REFRESH_MINUTES = max(1, int(os.environ.get("REALTIME_REFRESH_MINUTES", "30")))
 
 
 def setup_logging():
@@ -46,6 +53,20 @@ def setup_logging():
             ),
         ],
     )
+
+
+def realtime_job():
+    """高频实时刷新任务；上游数据未变化时自动跳过完整预测。"""
+    logger.info("开始实时天气刷新检查")
+    try:
+        from src.pipeline import WeatherPipeline
+        result = WeatherPipeline().run(mode="refresh").get("refresh", {})
+        if result.get("updated"):
+            logger.info("检测到新天气数据，预测已刷新")
+        else:
+            logger.info(f"实时刷新跳过: {result.get('reason', 'unknown')}")
+    except Exception as e:
+        logger.error(f"实时刷新任务失败: {e}", exc_info=True)
 
 
 def daily_job():
@@ -116,6 +137,10 @@ class WeatherScheduler:
 
     def setup_schedule(self):
         """设置调度任务"""
+        # 每30分钟检查一次上游数据；数据不变则不重跑完整预测。
+        schedule.every(REALTIME_REFRESH_MINUTES).minutes.do(realtime_job)
+        logger.info(f"实时刷新任务已设置: 每{REALTIME_REFRESH_MINUTES}分钟")
+
         # 每日07:00 CST预测
         schedule.every().day.at(f"{DAILY_PREDICTION_HOUR:02d}:00").do(daily_job)
         logger.info(f"每日预测任务已设置: {DAILY_PREDICTION_HOUR:02d}:00 CST")
@@ -173,12 +198,18 @@ def main():
         "--retrain", action="store_true",
         help="执行模型重训练（与--run-once配合）"
     )
+    parser.add_argument(
+        "--refresh-once", action="store_true",
+        help="立即检查最新天气数据并按需刷新预测"
+    )
     args = parser.parse_args()
 
     scheduler = WeatherScheduler()
 
     if args.daemon:
         scheduler.run_daemon()
+    elif args.refresh_once:
+        realtime_job()
     elif args.run_once:
         scheduler.run_once(retrain=args.retrain)
     else:
