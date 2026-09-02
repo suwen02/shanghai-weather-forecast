@@ -1,39 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-主编排管线
+上海天气预报主管线。
 
-四种运行模式：
-- init:    采集历史数据 + 训练模型
-- train:   仅训练模型
-- predict: 每日预测（采集当日数据→加载模型→预测→可视化）
-- full:    init + predict
-
-管线流程：
-1. 采集历史数据（5年中心站+3年30站）
-2. 特征工程（约150个特征）
-3. 训练温度/降水模型
-4. 校准（保形预测+等保序回归）
-5. 每日预测7天
-6. 生成可视化报告
+训练协议：历史观测先构建因果状态特征，再与 Open-Meteo Previous Runs
+固定 1–7 天提前量的多模型共识特征对齐。在线推理使用相同的 NWP 共识列和
+forecast_lead_days，避免未来 7 天因为复制最近历史状态而得到相同输入。
 """
 
 import logging
 import json
-from datetime import date, timedelta
-from pathlib import Path
+from datetime import date, timedelta, datetime
 from typing import Dict, Optional
 
 import pandas as pd
 import numpy as np
 
 from config.settings import (
-    RAW_DIR, PROCESSED_DIR, MODELS_DIR, PREDICTIONS_DIR, REPORTS_DIR,
-    ML_CONFIG, TIMEZONE, CITY_NAME, CITY_NAME_EN,
+    RAW_DIR, PROCESSED_DIR, PREDICTIONS_DIR,
+    ML_CONFIG, CITY_NAME, CITY_NAME_EN,
     TEMP_MODEL_PATH, PRECIP_MODEL_PATH, CALIBRATION_PATH,
 )
-from collectors.open_meteo import OpenMeteoCollector, run_daily_collection, collect_training_history
-from collectors.cma_stations import CMAStationCollector, run_station_collection, collect_station_history
-from features.engineer import FeatureEngineer
+from collectors.open_meteo import OpenMeteoCollector, collect_training_history
+from collectors.cma_stations import CMAStationCollector, collect_station_history
+from collectors.training_forecasts import collect_training_forecasts
+from features.nwp_aware_engineer import NwpAwareFeatureEngineer
 from models.temperature import TemperaturePredictor
 from models.precipitation import PrecipitationPredictor
 from models.calibration import CalibrationManager
@@ -42,120 +32,109 @@ logger = logging.getLogger(__name__)
 
 
 class WeatherPipeline:
-    """
-    天气预报主管线
-
-    编排数据采集、特征工程、模型训练、预测和报告生成。
-    """
+    """编排数据采集、训练、校准和在线预测。"""
 
     def __init__(self):
-        self.engineer = FeatureEngineer()
+        self.engineer = NwpAwareFeatureEngineer()
         self.temp_model = TemperaturePredictor()
         self.precip_model = PrecipitationPredictor()
         self.calibration = CalibrationManager()
         self.collector = OpenMeteoCollector()
         self.station_collector = CMAStationCollector()
 
-    # =========================================================================
-    # 步骤1: 采集历史数据
-    # =========================================================================
     def step1_collect_history(self, years: int = 5, station_years: int = 3) -> Dict:
-        """
-        采集训练用历史数据
-
-        Args:
-            years: 中心站历史年数
-            station_years: 多站点历史年数
-
-        Returns:
-            采集结果字典
-        """
-        logger.info(f"=== 步骤1: 采集历史数据 ({years}年) ===")
+        """采集观测历史、多站点历史和固定 lead Previous Runs。"""
+        logger.info("=== 步骤1: 采集历史训练数据 ===")
         results = {}
 
-        # 中心站历史
         center_files = collect_training_history(years)
         results.update(center_files)
 
-        # 多站点历史
         station_files = collect_station_history(station_years)
         results.update(station_files)
 
-        logger.info(f"历史数据采集完成: {len(results)}个文件")
+        previous_runs_path = collect_training_forecasts(years)
+        if previous_runs_path is not None:
+            results["historical_previous_runs"] = str(previous_runs_path)
+
+        logger.info("历史训练数据采集完成: %s个文件", len(results))
         return results
 
-    # =========================================================================
-    # 步骤2: 训练模型
-    # =========================================================================
+    def _latest_raw_file(self, pattern: str):
+        files = sorted(
+            RAW_DIR.glob(pattern),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        return files[0] if files else None
+
     def step2_train_models(self) -> Dict:
-        """
-        训练温度和降水模型
+        """使用固定 lead NWP 共识特征训练温度和降水模型。"""
+        logger.info("=== 步骤2: 训练 lead-aware 模型 ===")
 
-        从Parquet文件加载历史数据，构建特征，训练模型，
-        在校准集上拟合保形预测和等保序回归。
-
-        Returns:
-            训练指标字典
-        """
-        logger.info("=== 步骤2: 训练模型 ===")
-
-        # 加载历史数据
-        daily_path = RAW_DIR / "historical_daily_5yr.parquet"
-        if not daily_path.exists():
-            # 尝试其他文件名
-            parquet_files = list(RAW_DIR.glob("historical_daily_*.parquet"))
-            if parquet_files:
-                daily_path = parquet_files[0]
-            else:
-                raise FileNotFoundError(f"未找到历史逐日数据: {daily_path}")
+        daily_path = self._latest_raw_file("historical_daily_*.parquet")
+        if daily_path is None:
+            raise FileNotFoundError("未找到 historical_daily_*.parquet")
+        previous_runs_path = self._latest_raw_file("historical_previous_runs_*.parquet")
+        if previous_runs_path is None:
+            raise FileNotFoundError(
+                "未找到 historical_previous_runs_*.parquet；请先运行 init 或 collect_training_forecasts"
+            )
 
         historical = pd.read_parquet(daily_path)
-        logger.info(f"加载历史数据: {len(historical)}行")
-
-        # 特征工程
-        df, feature_cols, temp_target, precip_target = self.engineer.build_training_features(
-            historical
+        previous_runs = pd.read_parquet(previous_runs_path)
+        logger.info(
+            "加载训练数据: observations=%s, previous_runs=%s",
+            len(historical),
+            len(previous_runs),
         )
 
-        # 去除缺失目标的行
-        valid_mask = df[temp_target].notna() & df[precip_target].notna()
-        df = df[valid_mask].reset_index(drop=True)
-        logger.info(f"有效训练样本: {len(df)}行, {len(feature_cols)}个特征")
+        df, feature_cols, temp_target, precip_target = self.engineer.build_training_features(
+            historical,
+            previous_runs,
+        )
+        if not self.engineer.has_nwp_training_features(feature_cols):
+            raise RuntimeError(
+                "训练特征必须同时包含 forecast_lead_days 与 NWP 共识列；拒绝生成 legacy 模型"
+            )
 
-        # 填充缺失值
+        valid_mask = df[temp_target].notna() & df[precip_target].notna()
+        df = df[valid_mask].sort_values(["time", "forecast_lead_days"]).reset_index(drop=True)
+        if df.empty:
+            raise RuntimeError("观测与 Previous Runs 没有可对齐训练样本")
         df = self.engineer.impute_missing(df, feature_cols)
 
         X = df[feature_cols]
         y_temp = df[temp_target]
         y_precip = df[precip_target]
 
-        # 训练温度模型
         logger.info("训练温度模型...")
         temp_metrics = self.temp_model.train(X, y_temp, feature_names=feature_cols)
-
-        # 训练降水模型
         logger.info("训练降水模型...")
         precip_metrics = self.precip_model.train(X, y_precip, feature_names=feature_cols)
 
-        # 校准
         logger.info("拟合校准模型...")
         self._fit_calibration(X, y_temp, y_precip, feature_cols)
 
-        # 保存模型
         self.temp_model.save()
         self.precip_model.save()
         self.calibration.save()
 
-        # 保存处理后数据
-        processed_path = PROCESSED_DIR / "training_features.parquet"
+        processed_path = PROCESSED_DIR / "training_features_nwp_lead.parquet"
         df.to_parquet(processed_path, index=False)
-        logger.info(f"训练特征已保存: {processed_path}")
 
         return {
             "temperature": temp_metrics,
             "precipitation": precip_metrics,
             "n_features": len(feature_cols),
             "n_samples": len(df),
+            "nwp_training_aware": True,
+            "nwp_feature_count": sum("_model_" in name for name in feature_cols),
+            "lead_counts": {
+                int(lead): int(count)
+                for lead, count in df["forecast_lead_days"].value_counts().sort_index().items()
+            },
+            "previous_runs_path": str(previous_runs_path),
         }
 
     def _fit_calibration(
@@ -165,205 +144,234 @@ class WeatherPipeline:
         y_precip: pd.Series,
         feature_cols: list,
     ):
-        """在校准子集上拟合校准模型"""
+        """在末段时间样本上拟合保形温度区间与降水等保序校准。"""
         n = len(X)
         cal_start = int(n * (1 - ML_CONFIG.calibration_fraction))
-
         X_cal = X.iloc[cal_start:]
         y_temp_cal = y_temp.iloc[cal_start:].values
         y_precip_cal = y_precip.iloc[cal_start:].values
 
-        # 温度保形预测
         X_cal_aligned = self.temp_model._align_features(X_cal)
         X_cal_scaled = self.temp_model.scaler.transform(X_cal_aligned)
-
         quantile_preds_cal = {}
         for q in self.temp_model.quantiles:
             label = f"p{int(q*100):02d}"
             quantile_preds_cal[label] = self.temp_model.models[q].predict(X_cal_scaled)
-
         self.calibration.fit_conformal(y_temp_cal, quantile_preds_cal)
 
-        # 降水等保序回归
         X_precip_aligned = self.precip_model._align_features(X_cal)
         X_precip_scaled = self.precip_model.scaler.transform(X_precip_aligned)
-
         y_binary = (y_precip_cal >= ML_CONFIG.precip_occurrence_threshold).astype(int)
         p_raw = self.precip_model.classifier.predict_proba(X_precip_scaled)[:, 1]
         self.calibration.fit_isotonic(y_binary, p_raw)
 
-    # =========================================================================
-    # 步骤3: 每日预测
-    # =========================================================================
+    def _models_nwp_aware(self) -> bool:
+        return (
+            self.engineer.has_nwp_training_features(self.temp_model.feature_names)
+            and self.engineer.has_nwp_training_features(self.precip_model.feature_names)
+        )
+
     def step3_daily_predict(self, target_date: Optional[date] = None) -> Dict:
-        """
-        执行每日预测
-
-        1. 采集当日预报数据
-        2. 加载训练好的模型
-        3. 获取近期历史观测
-        4. 构建预测特征
-        5. 生成7天温度+降水概率预报
-        6. 保存JSON预测结果
-
-        Args:
-            target_date: 预测基准日期
-
-        Returns:
-            预测结果字典
-        """
+        """采集最新 NWP，并生成 7 天 lead-aware 预测。"""
         if target_date is None:
             target_date = date.today()
+        logger.info("=== 步骤3: 每日预测 (%s) ===", target_date)
 
-        logger.info(f"=== 步骤3: 每日预测 ({target_date}) ===")
-
-        # 加载模型
         self._load_models()
 
-        # 采集当日数据
         logger.info("采集当日预报数据...")
         det_df = self.collector.collect_deterministic_forecasts(target_date)
         ens_df = self.collector.collect_ensemble_summary()
         station_df = self.station_collector.collect_station_forecasts()
 
-        # 获取近期历史（60天用于滞后/滚动特征）
+        if not self._models_nwp_aware():
+            logger.warning(
+                "检测到 legacy 模型 artifact：缺少 forecast_lead_days/NWP 特征，改用未校准 NWP 共识 fallback"
+            )
+            output = self._nwp_consensus_fallback(det_df, target_date)
+            self._save_predictions(output, target_date)
+            return output
+
         logger.info("获取近期历史观测...")
-        recent_start = target_date - timedelta(days=60)
+        recent_start = target_date - timedelta(days=max(120, max(ML_CONFIG.rolling_windows)))
         recent_end = target_date - timedelta(days=1)
         recent = self.collector.collect_historical_data(recent_start, recent_end)
         recent_daily = recent.get("daily", pd.DataFrame())
 
-        # 构建预测特征
-        logger.info("构建预测特征...")
+        logger.info("构建未来 NWP + 因果状态特征...")
         pred_features = self.engineer.build_prediction_features(
             det_df, ens_df, station_df, recent_daily
         )
-
         if pred_features.empty:
             logger.error("预测特征构建失败")
             return {}
 
-        # 对齐特征列
-        pred_features = self.engineer.impute_missing(pred_features, self.engineer.feature_cols)
-
-        # 生成预测日期
-        forecast_dates = [
-            (target_date + timedelta(days=i)).isoformat()
-            for i in range(ML_CONFIG.forecast_horizon)
-        ]
-
-        # 取最后N行作为预测输入
+        pred_features = self.engineer.impute_missing(
+            pred_features,
+            self.engineer.feature_cols,
+        )
         n_pred = min(len(pred_features), ML_CONFIG.forecast_horizon)
-        X_pred = pred_features.tail(n_pred)
+        X_pred = pred_features.head(n_pred)
+        forecast_dates = pd.to_datetime(X_pred["time"]).dt.date.astype(str).tolist()
 
-        # 温度预测
         logger.info("生成温度预测...")
-        temp_results = self.temp_model.predict(X_pred, forecast_dates[:n_pred])
-
-        # 应用保形校准
+        temp_results = self.temp_model.predict(X_pred, forecast_dates)
         for result in temp_results:
             result.quantiles = self.calibration.calibrate_temperature_prediction(
                 result.quantiles
             )
 
-        # 降水预测
         logger.info("生成降水预测...")
-        precip_results = self.precip_model.predict(X_pred, forecast_dates[:n_pred])
-
-        # 应用等保序校准
+        precip_results = self.precip_model.predict(X_pred, forecast_dates)
         for result in precip_results:
-            p_rain = result.quantiles.get("p_rain", result.distribution_params.get("p_rain_occurrence", 0))
+            p_rain = result.quantiles.get(
+                "p_rain",
+                result.distribution_params.get("p_rain_occurrence", 0),
+            )
             calibrated_p = self.calibration.calibrate_precipitation_prediction(p_rain)
             result.quantiles["p_rain"] = round(calibrated_p, 4)
             result.distribution_params["p_rain_occurrence"] = round(calibrated_p, 4)
             result.distribution_params["p_dry"] = round(1 - calibrated_p, 4)
 
-        # 保存预测结果
         output = self._format_predictions(temp_results, precip_results, target_date)
+        output["nwp_training_aware"] = True
+        output["forecast_lead_days"] = X_pred["forecast_lead_days"].astype(int).tolist()
         self._save_predictions(output, target_date)
-
-        logger.info(f"每日预测完成: {len(temp_results)}天温度 + {len(precip_results)}天降水")
+        logger.info("每日预测完成: %s天", n_pred)
         return output
 
-    def _load_models(self):
-        """加载训练好的模型"""
-        if TEMP_MODEL_PATH.exists():
-            self.temp_model.load()
-        else:
-            logger.warning("温度模型文件不存在，需要先训练")
+    def _nwp_consensus_fallback(self, det_df: pd.DataFrame, report_date: date) -> Dict:
+        """Legacy artifact 期间直接发布当前 NWP 共识，避免展示重复 ML 预测。"""
+        consensus = self.engineer.build_model_consensus_features(det_df)
+        if consensus.empty:
+            return {}
+        consensus = consensus.copy()
+        consensus["time"] = pd.to_datetime(consensus["time"])
+        consensus = consensus.sort_values("time")
+        consensus = consensus[
+            consensus["time"].dt.date >= report_date
+        ].head(ML_CONFIG.forecast_horizon)
 
-        if PRECIP_MODEL_PATH.exists():
-            self.precip_model.load()
-        else:
-            logger.warning("降水模型文件不存在，需要先训练")
-
-        if CALIBRATION_PATH.exists():
-            self.calibration.load()
-
-    def _format_predictions(self, temp_results, precip_results, report_date) -> Dict:
-        """格式化预测结果为JSON结构"""
-        from datetime import datetime
-
+        det = det_df.copy()
+        det["time"] = pd.to_datetime(det["time"])
         output = {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "city": CITY_NAME,
             "city_en": CITY_NAME_EN,
+            "source": "nwp_consensus_fallback",
+            "calibrated": False,
+            "nwp_training_aware": False,
             "temperature": [],
             "precipitation": [],
         }
 
-        for result in temp_results:
+        for lead, (_, row) in enumerate(consensus.iterrows(), start=1):
+            target_time = pd.Timestamp(row["time"])
+            t_mean = float(row.get("tmax_max_model_mean", np.nan))
+            t_std = float(row.get("tmax_max_model_std", 0.0) or 0.0)
+            t_min = float(row.get("tmax_max_model_min", t_mean))
+            t_max = float(row.get("tmax_max_model_max", t_mean))
+            p_mean = float(row.get("precip_model_mean", 0.0) or 0.0)
+            p_std = float(row.get("precip_model_std", 0.0) or 0.0)
+
+            day_raw = det[det["time"].dt.normalize() == target_time.normalize()]
+            if "precipitation_sum" in day_raw and not day_raw.empty:
+                valid_precip = pd.to_numeric(day_raw["precipitation_sum"], errors="coerce").dropna()
+                p_rain = float((valid_precip >= ML_CONFIG.precip_occurrence_threshold).mean()) if len(valid_precip) else 0.0
+            else:
+                p_rain = 0.0
+
+            temp_quantiles = {
+                "p05": round(min(t_min, t_mean - 1.64 * t_std), 2),
+                "p25": round(t_mean - 0.67 * t_std, 2),
+                "p50": round(t_mean, 2),
+                "p75": round(t_mean + 0.67 * t_std, 2),
+                "p95": round(max(t_max, t_mean + 1.64 * t_std), 2),
+            }
+            output["temperature"].append({
+                "date": target_time.date().isoformat(),
+                "lead_days": lead,
+                "median": round(t_mean, 2),
+                "quantiles": temp_quantiles,
+                "confidence": "un-calibrated",
+            })
+            output["precipitation"].append({
+                "date": target_time.date().isoformat(),
+                "lead_days": lead,
+                "expected_mm": round(max(0.0, p_mean), 2),
+                "quantiles": {
+                    "p25": round(max(0.0, p_mean - 0.67 * p_std), 2),
+                    "p50": round(max(0.0, p_mean), 2),
+                    "p75": round(max(0.0, p_mean + 0.67 * p_std), 2),
+                    "p_rain": round(p_rain, 4),
+                },
+                "params": {"p_rain_occurrence": round(p_rain, 4)},
+                "confidence": "un-calibrated",
+            })
+        return output
+
+    def _load_models(self):
+        if TEMP_MODEL_PATH.exists():
+            self.temp_model.load()
+        else:
+            logger.warning("温度模型文件不存在，需要先训练")
+        if PRECIP_MODEL_PATH.exists():
+            self.precip_model.load()
+        else:
+            logger.warning("降水模型文件不存在，需要先训练")
+        if CALIBRATION_PATH.exists():
+            self.calibration.load()
+
+        names = list(dict.fromkeys([
+            *getattr(self.temp_model, "feature_names", []),
+            *getattr(self.precip_model, "feature_names", []),
+        ]))
+        self.engineer.feature_cols = names
+
+    def _format_predictions(self, temp_results, precip_results, report_date) -> Dict:
+        output = {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "city": CITY_NAME,
+            "city_en": CITY_NAME_EN,
+            "source": "ml_postprocessed_nwp",
+            "calibrated": True,
+            "temperature": [],
+            "precipitation": [],
+        }
+        for index, result in enumerate(temp_results, start=1):
             output["temperature"].append({
                 "date": result.target_date,
+                "lead_days": index,
                 "median": result.point_estimate,
                 "quantiles": result.quantiles,
                 "confidence": result.confidence,
             })
-
-        for result in precip_results:
+        for index, result in enumerate(precip_results, start=1):
             output["precipitation"].append({
                 "date": result.target_date,
+                "lead_days": index,
                 "expected_mm": result.point_estimate,
                 "quantiles": result.quantiles,
                 "params": result.distribution_params,
                 "confidence": result.confidence,
             })
-
         return output
 
     def _save_predictions(self, output: Dict, report_date: date):
-        """保存预测结果JSON"""
         date_str = report_date.strftime("%Y%m%d")
         pred_path = PREDICTIONS_DIR / f"predictions_{date_str}.json"
-
         with open(pred_path, "w", encoding="utf-8") as f:
             json.dump(output, f, ensure_ascii=False, indent=2)
+        logger.info("预测结果已保存: %s", pred_path)
 
-        logger.info(f"预测结果已保存: {pred_path}")
-
-    # =========================================================================
-    # 运行模式
-    # =========================================================================
     def run(self, mode: str = "full", **kwargs) -> Dict:
-        """
-        运行管线
-
-        Args:
-            mode: 运行模式 (init/train/predict/full/evaluate)
-            **kwargs: 额外参数
-
-        Returns:
-            运行结果字典
-        """
         results = {}
-
         if mode in ("init", "full"):
             results["history"] = self.step1_collect_history(
                 years=kwargs.get("years", ML_CONFIG.historical_years),
                 station_years=kwargs.get("station_years", ML_CONFIG.station_historical_years),
             )
             results["training"] = self.step2_train_models()
-
         elif mode == "train":
             results["training"] = self.step2_train_models()
 
@@ -371,5 +379,4 @@ class WeatherPipeline:
             results["prediction"] = self.step3_daily_predict(
                 target_date=kwargs.get("target_date"),
             )
-
         return results
