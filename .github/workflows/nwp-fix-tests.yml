@@ -1,0 +1,37 @@
+name: NWP fix tests
+
+on:
+  push:
+    branches:
+      - fix/nwp-training-protocol-actual
+  pull_request:
+    paths:
+      - "features/**"
+      - "collectors/**"
+      - "src/**"
+      - "tests/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Run regression tests
+        run: |
+          pytest tests/test_nwp_training.py tests/test_prediction_frame.py -q
+      - name: Compile changed modules
+        run: |
+          python -m py_compile \
+            features/nwp_training.py \
+            features/nwp_aware_engineer.py \
+            features/prediction_frame.py \
+            collectors/training_forecasts.py \
+            src/train_nwp_models.py
