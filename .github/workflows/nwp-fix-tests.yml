@@ -34,6 +34,7 @@ jobs:
             tests/test_prediction_frame.py \
             tests/test_previous_runs_training.py \
             tests/test_nwp_fallback.py \
+            tests/test_causal_features.py \
             tests/test_apply_nwp_training_fix.py \
             -q
       - name: Compile changed modules
