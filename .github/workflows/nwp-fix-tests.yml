@@ -33,6 +33,7 @@ jobs:
             tests/test_nwp_training.py \
             tests/test_prediction_frame.py \
             tests/test_previous_runs_training.py \
+            tests/test_nwp_fallback.py \
             tests/test_apply_nwp_training_fix.py \
             -q
       - name: Compile changed modules
@@ -41,6 +42,7 @@ jobs:
             features/nwp_training.py \
             features/nwp_aware_engineer.py \
             features/prediction_frame.py \
+            features/nwp_fallback.py \
             collectors/training_forecasts.py \
             src/train_nwp_models.py \
             src/pipeline.py \
