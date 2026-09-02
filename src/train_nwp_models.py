@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""使用历史 NWP 共识特征重新训练并覆盖现有模型 artifacts。"""
+"""使用固定提前量 Previous Runs 共识特征重新训练模型 artifacts。"""
 
 from __future__ import annotations
 
@@ -56,27 +56,31 @@ def _fit_calibration(
 
 def train_nwp_models(
     daily_path: Optional[Path] = None,
-    forecast_path: Optional[Path] = None,
+    previous_runs_path: Optional[Path] = None,
 ) -> dict:
-    """训练 NWP-aware 温度/降水模型并保存到现有 artifact 路径。"""
+    """训练 lead-aware 温度/降水模型并保存到现有 artifact 路径。"""
     daily_path = daily_path or _latest_matching("historical_daily_*.parquet")
-    forecast_path = forecast_path or _latest_matching("historical_forecasts_*.parquet")
+    previous_runs_path = previous_runs_path or _latest_matching(
+        "historical_previous_runs_*.parquet"
+    )
 
     historical = pd.read_parquet(daily_path)
-    historical_forecasts = pd.read_parquet(forecast_path)
+    previous_runs = pd.read_parquet(previous_runs_path)
 
     engineer = NwpAwareFeatureEngineer()
     df, feature_cols, temp_target, precip_target = engineer.build_training_features(
         historical,
-        historical_forecasts,
+        previous_runs,
     )
     if not engineer.has_nwp_training_features(feature_cols):
         raise RuntimeError(
-            "训练特征中没有 NWP 共识列；拒绝生成会导致未来多天输入近似相同的 legacy 模型"
+            "训练特征必须同时包含 forecast_lead_days 和 NWP 共识列；拒绝生成 legacy 模型"
         )
+    if df.empty:
+        raise RuntimeError("观测与 Previous Runs 没有可对齐的训练样本")
 
     valid = df[temp_target].notna() & df[precip_target].notna()
-    df = df[valid].reset_index(drop=True)
+    df = df[valid].sort_values(["time", "forecast_lead_days"]).reset_index(drop=True)
     df = engineer.impute_missing(df, feature_cols)
 
     X = df[feature_cols]
@@ -95,9 +99,13 @@ def train_nwp_models(
     precip_model.save()
     calibration.save()
 
-    processed_path = PROCESSED_DIR / "training_features_nwp.parquet"
+    processed_path = PROCESSED_DIR / "training_features_nwp_lead.parquet"
     df.to_parquet(processed_path, index=False)
 
+    lead_counts = {
+        int(lead): int(count)
+        for lead, count in df["forecast_lead_days"].value_counts().sort_index().items()
+    }
     return {
         "temperature": temp_metrics,
         "precipitation": precip_metrics,
@@ -105,19 +113,20 @@ def train_nwp_models(
         "n_samples": len(df),
         "nwp_training_aware": True,
         "nwp_feature_count": sum("_model_" in name for name in feature_cols),
+        "lead_counts": lead_counts,
         "daily_path": str(daily_path),
-        "forecast_path": str(forecast_path),
+        "previous_runs_path": str(previous_runs_path),
         "processed_path": str(processed_path),
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="重新训练 NWP-aware 上海天气模型")
+    parser = argparse.ArgumentParser(description="重新训练 lead-aware 上海天气模型")
     parser.add_argument("--daily-path", type=Path)
-    parser.add_argument("--forecast-path", type=Path)
+    parser.add_argument("--previous-runs-path", type=Path)
     args = parser.parse_args()
 
-    result = train_nwp_models(args.daily_path, args.forecast_path)
+    result = train_nwp_models(args.daily_path, args.previous_runs_path)
     print(result)
 
 
