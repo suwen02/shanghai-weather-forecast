@@ -62,11 +62,14 @@ def build_forecast_scaffold(
 
     future = future.sort_values("time").reset_index(drop=True)
     if last_history_time is not None:
-        base_day = pd.Timestamp(last_history_time).normalize()
+        # 历史只到昨天，因此“昨天 + 1 天”是产品 forecast origin（今天）。
+        # 页面第 1 张卡是今天，对应 Previous Runs day0；随后依次 day1..day6。
+        forecast_origin = pd.Timestamp(last_history_time).normalize() + pd.Timedelta(days=1)
         future["forecast_lead_days"] = (
-            future["time"].dt.normalize() - base_day
+            future["time"].dt.normalize() - forecast_origin
         ).dt.days.astype(int)
     else:
-        future["forecast_lead_days"] = range(1, len(future) + 1)
+        future["forecast_lead_days"] = range(0, len(future))
 
+    future = future[future["forecast_lead_days"] >= 0].reset_index(drop=True)
     return future
