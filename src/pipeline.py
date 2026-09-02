@@ -3,7 +3,7 @@
 上海天气预报主管线。
 
 训练协议：历史观测先构建因果状态特征，再与 Open-Meteo Previous Runs
-固定 1–7 天提前量的多模型共识特征对齐。在线推理使用相同的 NWP 共识列和
+固定 day0–day6 提前量的多模型共识特征对齐。在线推理使用相同的 NWP 共识列和
 forecast_lead_days，避免未来 7 天因为复制最近历史状态而得到相同输入。
 """
 
@@ -13,7 +13,6 @@ from datetime import date, timedelta, datetime
 from typing import Dict, Optional
 
 import pandas as pd
-import numpy as np
 
 from config.settings import (
     RAW_DIR, PROCESSED_DIR, PREDICTIONS_DIR,
@@ -24,6 +23,7 @@ from collectors.open_meteo import OpenMeteoCollector, collect_training_history
 from collectors.cma_stations import CMAStationCollector, collect_station_history
 from collectors.training_forecasts import collect_training_forecasts
 from features.nwp_aware_engineer import NwpAwareFeatureEngineer
+from features.nwp_fallback import build_nwp_consensus_fallback
 from models.temperature import TemperaturePredictor
 from models.precipitation import PrecipitationPredictor
 from models.calibration import CalibrationManager
@@ -213,6 +213,7 @@ class WeatherPipeline:
         n_pred = min(len(pred_features), ML_CONFIG.forecast_horizon)
         X_pred = pred_features.head(n_pred)
         forecast_dates = pd.to_datetime(X_pred["time"]).dt.date.astype(str).tolist()
+        forecast_leads = X_pred["forecast_lead_days"].astype(int).tolist()
 
         logger.info("生成温度预测...")
         temp_results = self.temp_model.predict(X_pred, forecast_dates)
@@ -233,82 +234,30 @@ class WeatherPipeline:
             result.distribution_params["p_rain_occurrence"] = round(calibrated_p, 4)
             result.distribution_params["p_dry"] = round(1 - calibrated_p, 4)
 
-        output = self._format_predictions(temp_results, precip_results, target_date)
+        output = self._format_predictions(
+            temp_results,
+            precip_results,
+            target_date,
+            forecast_leads,
+        )
         output["nwp_training_aware"] = True
-        output["forecast_lead_days"] = X_pred["forecast_lead_days"].astype(int).tolist()
+        output["forecast_lead_days"] = forecast_leads
         self._save_predictions(output, target_date)
         logger.info("每日预测完成: %s天", n_pred)
         return output
 
     def _nwp_consensus_fallback(self, det_df: pd.DataFrame, report_date: date) -> Dict:
-        """Legacy artifact 期间直接发布当前 NWP 共识，避免展示重复 ML 预测。"""
+        """Legacy artifact 期间发布当前 NWP 共识，避免重复 ML 预测。"""
         consensus = self.engineer.build_model_consensus_features(det_df)
-        if consensus.empty:
-            return {}
-        consensus = consensus.copy()
-        consensus["time"] = pd.to_datetime(consensus["time"])
-        consensus = consensus.sort_values("time")
-        consensus = consensus[
-            consensus["time"].dt.date >= report_date
-        ].head(ML_CONFIG.forecast_horizon)
-
-        det = det_df.copy()
-        det["time"] = pd.to_datetime(det["time"])
-        output = {
-            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "city": CITY_NAME,
-            "city_en": CITY_NAME_EN,
-            "source": "nwp_consensus_fallback",
-            "calibrated": False,
-            "nwp_training_aware": False,
-            "temperature": [],
-            "precipitation": [],
-        }
-
-        for lead, (_, row) in enumerate(consensus.iterrows(), start=1):
-            target_time = pd.Timestamp(row["time"])
-            t_mean = float(row.get("tmax_max_model_mean", np.nan))
-            t_std = float(row.get("tmax_max_model_std", 0.0) or 0.0)
-            t_min = float(row.get("tmax_max_model_min", t_mean))
-            t_max = float(row.get("tmax_max_model_max", t_mean))
-            p_mean = float(row.get("precip_model_mean", 0.0) or 0.0)
-            p_std = float(row.get("precip_model_std", 0.0) or 0.0)
-
-            day_raw = det[det["time"].dt.normalize() == target_time.normalize()]
-            if "precipitation_sum" in day_raw and not day_raw.empty:
-                valid_precip = pd.to_numeric(day_raw["precipitation_sum"], errors="coerce").dropna()
-                p_rain = float((valid_precip >= ML_CONFIG.precip_occurrence_threshold).mean()) if len(valid_precip) else 0.0
-            else:
-                p_rain = 0.0
-
-            temp_quantiles = {
-                "p05": round(min(t_min, t_mean - 1.64 * t_std), 2),
-                "p25": round(t_mean - 0.67 * t_std, 2),
-                "p50": round(t_mean, 2),
-                "p75": round(t_mean + 0.67 * t_std, 2),
-                "p95": round(max(t_max, t_mean + 1.64 * t_std), 2),
-            }
-            output["temperature"].append({
-                "date": target_time.date().isoformat(),
-                "lead_days": lead,
-                "median": round(t_mean, 2),
-                "quantiles": temp_quantiles,
-                "confidence": "un-calibrated",
-            })
-            output["precipitation"].append({
-                "date": target_time.date().isoformat(),
-                "lead_days": lead,
-                "expected_mm": round(max(0.0, p_mean), 2),
-                "quantiles": {
-                    "p25": round(max(0.0, p_mean - 0.67 * p_std), 2),
-                    "p50": round(max(0.0, p_mean), 2),
-                    "p75": round(max(0.0, p_mean + 0.67 * p_std), 2),
-                    "p_rain": round(p_rain, 4),
-                },
-                "params": {"p_rain_occurrence": round(p_rain, 4)},
-                "confidence": "un-calibrated",
-            })
-        return output
+        return build_nwp_consensus_fallback(
+            det_df=det_df,
+            consensus=consensus,
+            report_date=report_date,
+            horizon=ML_CONFIG.forecast_horizon,
+            precipitation_threshold=ML_CONFIG.precip_occurrence_threshold,
+            city_name=CITY_NAME,
+            city_name_en=CITY_NAME_EN,
+        )
 
     def _load_models(self):
         if TEMP_MODEL_PATH.exists():
@@ -328,7 +277,13 @@ class WeatherPipeline:
         ]))
         self.engineer.feature_cols = names
 
-    def _format_predictions(self, temp_results, precip_results, report_date) -> Dict:
+    def _format_predictions(
+        self,
+        temp_results,
+        precip_results,
+        report_date,
+        forecast_leads=None,
+    ) -> Dict:
         output = {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "city": CITY_NAME,
@@ -338,18 +293,21 @@ class WeatherPipeline:
             "temperature": [],
             "precipitation": [],
         }
-        for index, result in enumerate(temp_results, start=1):
+        lead_values = list(forecast_leads or [])
+        for index, result in enumerate(temp_results):
+            lead_days = lead_values[index] if index < len(lead_values) else index
             output["temperature"].append({
                 "date": result.target_date,
-                "lead_days": index,
+                "lead_days": int(lead_days),
                 "median": result.point_estimate,
                 "quantiles": result.quantiles,
                 "confidence": result.confidence,
             })
-        for index, result in enumerate(precip_results, start=1):
+        for index, result in enumerate(precip_results):
+            lead_days = lead_values[index] if index < len(lead_values) else index
             output["precipitation"].append({
                 "date": result.target_date,
-                "lead_days": index,
+                "lead_days": int(lead_days),
                 "expected_mm": result.point_estimate,
                 "quantiles": result.quantiles,
                 "params": result.distribution_params,
