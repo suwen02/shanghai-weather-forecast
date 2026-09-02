@@ -10,20 +10,20 @@ def test_normalize_previous_runs_hourly_aggregates_daily_by_lead_and_model():
                 "2026-08-01T00:00", "2026-08-01T12:00",
                 "2026-08-02T00:00", "2026-08-02T12:00",
             ],
-            "temperature_2m_previous_day1": [25.0, 33.0, 26.0, 34.0],
-            "temperature_2m_previous_day2": [24.0, 31.0, 25.0, 32.0],
-            "precipitation_previous_day1": [0.0, 2.0, 1.0, 3.0],
-            "precipitation_previous_day2": [4.0, 6.0, 0.0, 2.0],
+            "temperature_2m_previous_day0": [25.0, 33.0, 26.0, 34.0],
+            "temperature_2m_previous_day1": [24.0, 31.0, 25.0, 32.0],
+            "precipitation_previous_day0": [0.0, 2.0, 1.0, 3.0],
+            "precipitation_previous_day1": [4.0, 6.0, 0.0, 2.0],
         }
     }
 
-    result = normalize_previous_runs_hourly(payload, model="gfs_seamless", lead_days=(1, 2))
+    result = normalize_previous_runs_hourly(payload, model="gfs_seamless", lead_days=(0, 1))
 
     assert result[["time", "forecast_lead_days", "model"]].to_dict("records") == [
+        {"time": pd.Timestamp("2026-08-01"), "forecast_lead_days": 0, "model": "gfs_seamless"},
         {"time": pd.Timestamp("2026-08-01"), "forecast_lead_days": 1, "model": "gfs_seamless"},
-        {"time": pd.Timestamp("2026-08-01"), "forecast_lead_days": 2, "model": "gfs_seamless"},
+        {"time": pd.Timestamp("2026-08-02"), "forecast_lead_days": 0, "model": "gfs_seamless"},
         {"time": pd.Timestamp("2026-08-02"), "forecast_lead_days": 1, "model": "gfs_seamless"},
-        {"time": pd.Timestamp("2026-08-02"), "forecast_lead_days": 2, "model": "gfs_seamless"},
     ]
     first = result.iloc[0]
     assert first["temperature_2m_max"] == 33.0
@@ -36,13 +36,13 @@ def test_normalize_previous_runs_hourly_drops_unavailable_leads():
     payload = {
         "hourly": {
             "time": ["2026-08-01T00:00", "2026-08-01T12:00"],
-            "temperature_2m_previous_day1": [25.0, 33.0],
-            "precipitation_previous_day1": [0.0, 2.0],
-            "temperature_2m_previous_day2": [None, None],
-            "precipitation_previous_day2": [None, None],
+            "temperature_2m_previous_day0": [25.0, 33.0],
+            "precipitation_previous_day0": [0.0, 2.0],
+            "temperature_2m_previous_day1": [None, None],
+            "precipitation_previous_day1": [None, None],
         }
     }
 
-    result = normalize_previous_runs_hourly(payload, model="short_model", lead_days=(1, 2))
+    result = normalize_previous_runs_hourly(payload, model="short_model", lead_days=(0, 1))
 
-    assert result["forecast_lead_days"].tolist() == [1]
+    assert result["forecast_lead_days"].tolist() == [0]
