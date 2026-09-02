@@ -49,7 +49,7 @@ def test_expand_observation_features_by_lead_keeps_causal_state_and_target():
     assert result["tmax_max_model_mean"].tolist() == [32.0, 30.0]
 
 
-def test_nwp_aware_engineer_builds_observation_lags_before_lead_expansion(monkeypatch):
+def test_nwp_aware_engineer_aligns_observation_lags_to_each_forecast_origin(monkeypatch):
     from features.nwp_aware_engineer import NwpAwareFeatureEngineer
 
     engineer = NwpAwareFeatureEngineer()
@@ -75,9 +75,11 @@ def test_nwp_aware_engineer_builds_observation_lags_before_lead_expansion(monkey
 
     monkeypatch.setattr(engineer._base_engineer_type, "build_training_features", fake_base)
     result, cols, _, _ = engineer.build_training_features(observations, previous_runs)
+    result = result.sort_values("forecast_lead_days").reset_index(drop=True)
 
     assert len(result) == 2
-    assert result["temperature_2m_max_lag1d"].tolist() == [31.0, 31.0]
+    assert result.loc[0, "temperature_2m_max_lag1d"] == 31.0
+    assert pd.isna(result.loc[1, "temperature_2m_max_lag1d"])
     assert result["forecast_lead_days"].tolist() == [0, 1]
     assert "forecast_lead_days" in cols
     assert "tmax_max_model_mean" in cols
@@ -117,9 +119,7 @@ def test_nwp_aware_prediction_recomputes_calendar_and_lead_features(monkeypatch)
     }))
     monkeypatch.setattr(engineer, "build_ensemble_features", lambda _: pd.DataFrame())
     monkeypatch.setattr(engineer, "build_station_spatial_features", lambda _: pd.DataFrame())
-    monkeypatch.setattr(engineer, "add_physical_features", lambda df: df)
     monkeypatch.setattr(engineer, "add_shanghai_features", lambda df: df)
-    monkeypatch.setattr(engineer, "add_yoy_features", lambda df: df)
     monkeypatch.setattr(engineer, "add_lag_features", lambda df: df)
     monkeypatch.setattr(engineer, "add_rolling_features", lambda df: df)
     monkeypatch.setattr(
