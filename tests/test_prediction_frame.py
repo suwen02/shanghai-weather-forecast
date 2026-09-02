@@ -3,7 +3,7 @@ import pandas as pd
 from features.prediction_frame import build_forecast_scaffold
 
 
-def test_seven_day_scaffold_preserves_nwp_divergence():
+def test_seven_day_scaffold_preserves_nwp_divergence_and_lead_days():
     history = pd.DataFrame({
         "time": pd.to_datetime(["2026-09-01"]),
         "temperature_2m_max_lag1d": [32.0],
@@ -18,6 +18,7 @@ def test_seven_day_scaffold_preserves_nwp_divergence():
     result = build_forecast_scaffold(history, consensus, pd.DataFrame(), pd.DataFrame())
 
     assert len(result) == 7
+    assert result["forecast_lead_days"].tolist() == [1, 2, 3, 4, 5, 6, 7]
     assert result["tmax_max_model_mean"].nunique() == 7
     assert result["temperature_2m_max_lag1d"].nunique() == 1
 
@@ -43,5 +44,6 @@ def test_forecast_sources_override_nan_columns_from_history():
 
     result = build_forecast_scaffold(history, consensus, ensemble, spatial)
 
+    assert result.loc[0, "forecast_lead_days"] == 1
     assert result.loc[0, "ens_spread"] == 2.5
     assert result.loc[0, "spatial_temp_mean"] == 31.4
