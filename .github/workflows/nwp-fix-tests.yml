@@ -9,6 +9,7 @@ on:
       - "features/**"
       - "collectors/**"
       - "src/**"
+      - "scripts/**"
       - "tests/**"
 
 jobs:
@@ -26,7 +27,11 @@ jobs:
           pip install -r requirements.txt pytest
       - name: Run regression tests
         run: |
-          pytest tests/test_nwp_training.py tests/test_prediction_frame.py -q
+          pytest \
+            tests/test_nwp_training.py \
+            tests/test_prediction_frame.py \
+            tests/test_apply_nwp_training_fix.py \
+            -q
       - name: Compile changed modules
         run: |
           python -m py_compile \
@@ -34,4 +39,5 @@ jobs:
             features/nwp_aware_engineer.py \
             features/prediction_frame.py \
             collectors/training_forecasts.py \
-            src/train_nwp_models.py
+            src/train_nwp_models.py \
+            scripts/apply_nwp_training_fix.py
