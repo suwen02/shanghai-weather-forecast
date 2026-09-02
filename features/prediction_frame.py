@@ -20,7 +20,7 @@ def build_forecast_scaffold(
     ensemble: pd.DataFrame,
     spatial: pd.DataFrame,
 ) -> pd.DataFrame:
-    """以未来 NWP 日期为主表，并携带最近历史状态特征。"""
+    """以未来 NWP 日期为主表，携带最近历史状态并标记固定提前量。"""
     history = _normalize_time(history_features)
     consensus = _normalize_time(consensus)
     ensemble = _normalize_time(ensemble)
@@ -60,4 +60,13 @@ def build_forecast_scaffold(
                 axis=1,
             )
 
-    return future.sort_values("time").reset_index(drop=True)
+    future = future.sort_values("time").reset_index(drop=True)
+    if last_history_time is not None:
+        base_day = pd.Timestamp(last_history_time).normalize()
+        future["forecast_lead_days"] = (
+            future["time"].dt.normalize() - base_day
+        ).dt.days.astype(int)
+    else:
+        future["forecast_lead_days"] = range(1, len(future) + 1)
+
+    return future
