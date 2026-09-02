@@ -68,3 +68,40 @@ def test_nwp_training_awareness_requires_model_features():
 
     assert NwpAwareFeatureEngineer.has_nwp_training_features(["doy_sin", "tmax_max_model_mean"])
     assert not NwpAwareFeatureEngineer.has_nwp_training_features(["doy_sin", "temperature_2m_max_lag1d"])
+
+
+def test_nwp_aware_prediction_recomputes_calendar_features(monkeypatch):
+    from features.nwp_aware_engineer import NwpAwareFeatureEngineer
+
+    engineer = NwpAwareFeatureEngineer()
+    history = pd.DataFrame({
+        "time": pd.to_datetime(["2026-09-01"]),
+        "state": [5.0],
+    })
+    det = pd.DataFrame({
+        "time": pd.to_datetime(["2026-09-02", "2026-09-03"]),
+        "model": ["m1", "m1"],
+        "x": [1, 2],
+    })
+
+    monkeypatch.setattr(engineer, "build_model_consensus_features", lambda _: pd.DataFrame({
+        "time": pd.to_datetime(["2026-09-02", "2026-09-03"]),
+        "tmax_max_model_mean": [31.0, 35.0],
+    }))
+    monkeypatch.setattr(engineer, "build_ensemble_features", lambda _: pd.DataFrame())
+    monkeypatch.setattr(engineer, "build_station_spatial_features", lambda _: pd.DataFrame())
+    monkeypatch.setattr(engineer, "add_physical_features", lambda df: df)
+    monkeypatch.setattr(engineer, "add_shanghai_features", lambda df: df)
+    monkeypatch.setattr(engineer, "add_yoy_features", lambda df: df)
+    monkeypatch.setattr(engineer, "add_lag_features", lambda df: df)
+    monkeypatch.setattr(engineer, "add_rolling_features", lambda df: df)
+    monkeypatch.setattr(
+        engineer,
+        "add_temporal_features",
+        lambda df: df.assign(calendar_day=pd.to_datetime(df["time"]).dt.day),
+    )
+
+    result = engineer.build_prediction_features(det, pd.DataFrame(), pd.DataFrame(), history)
+
+    assert result["calendar_day"].tolist() == [2, 3]
+    assert result["tmax_max_model_mean"].tolist() == [31.0, 35.0]
