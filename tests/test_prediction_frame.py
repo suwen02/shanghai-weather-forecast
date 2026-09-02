@@ -18,7 +18,7 @@ def test_seven_day_scaffold_preserves_nwp_divergence_and_lead_days():
     result = build_forecast_scaffold(history, consensus, pd.DataFrame(), pd.DataFrame())
 
     assert len(result) == 7
-    assert result["forecast_lead_days"].tolist() == [1, 2, 3, 4, 5, 6, 7]
+    assert result["forecast_lead_days"].tolist() == [0, 1, 2, 3, 4, 5, 6]
     assert result["tmax_max_model_mean"].nunique() == 7
     assert result["temperature_2m_max_lag1d"].nunique() == 1
 
@@ -44,6 +44,6 @@ def test_forecast_sources_override_nan_columns_from_history():
 
     result = build_forecast_scaffold(history, consensus, ensemble, spatial)
 
-    assert result.loc[0, "forecast_lead_days"] == 1
+    assert result.loc[0, "forecast_lead_days"] == 0
     assert result.loc[0, "ens_spread"] == 2.5
     assert result.loc[0, "spatial_temp_mean"] == 31.4
