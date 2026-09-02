@@ -36,7 +36,7 @@ def test_nwp_aware_yoy_feature_is_lag_only_not_current_target_difference():
     assert "precipitation_sum_yoy_diff" not in result.columns
 
 
-def test_training_feature_contract_drops_same_day_observation_derivatives(monkeypatch):
+def test_training_feature_contract_keeps_only_servable_observation_features(monkeypatch):
     engineer = NwpAwareFeatureEngineer()
     observations = pd.DataFrame({
         "time": pd.to_datetime(["2026-08-01"]),
@@ -78,8 +78,46 @@ def test_training_feature_contract_drops_same_day_observation_derivatives(monkey
     assert "doy_sin" in cols
     assert "temperature_2m_max_lag1d" in cols
     assert "temperature_2m_max_rmean3d" in cols
-    assert "temperature_2m_max_yoy" in cols
     assert "tmax_max_model_mean" in cols
+    assert "temperature_2m_max_yoy" not in cols
     assert "sat_vapor_pressure" not in cols
     assert "rh_seasonal_anomaly" not in cols
     assert "precipitation_probability_max" not in cols
+
+
+def test_lead_state_features_are_aligned_to_forecast_origin(monkeypatch):
+    engineer = NwpAwareFeatureEngineer()
+    observations = pd.DataFrame({
+        "time": pd.to_datetime(["2026-08-01", "2026-08-02", "2026-08-03"]),
+        "temperature_2m_max": [10.0, 20.0, 30.0],
+        "precipitation_sum": [0.0, 0.0, 0.0],
+    })
+    previous_runs = pd.DataFrame({
+        "time": pd.to_datetime(["2026-08-03", "2026-08-03"]),
+        "forecast_lead_days": [0, 1],
+        "model": ["m1", "m1"],
+        "temperature_2m_max": [31.0, 29.0],
+        "temperature_2m_min": [24.0, 23.0],
+        "precipitation_sum": [1.0, 2.0],
+    })
+
+    def fake_base(self, historical):
+        built = historical.copy()
+        built["doy_sin"] = [0.1, 0.2, 0.3]
+        built["temperature_2m_max_lag1d"] = [float("nan"), 10.0, 20.0]
+        built["temperature_2m_max_rmean2d"] = [float("nan"), 10.0, 15.0]
+        return (
+            built,
+            ["doy_sin", "temperature_2m_max_lag1d", "temperature_2m_max_rmean2d"],
+            "temperature_2m_max",
+            "precipitation_sum",
+        )
+
+    monkeypatch.setattr(engineer._base_engineer_type, "build_training_features", fake_base)
+    result, _, _, _ = engineer.build_training_features(observations, previous_runs)
+    rows = result.sort_values("forecast_lead_days").reset_index(drop=True)
+
+    assert rows.loc[0, "temperature_2m_max_lag1d"] == 20.0
+    assert rows.loc[1, "temperature_2m_max_lag1d"] == 10.0
+    assert rows.loc[0, "temperature_2m_max_rmean2d"] == 15.0
+    assert rows.loc[1, "temperature_2m_max_rmean2d"] == 10.0
