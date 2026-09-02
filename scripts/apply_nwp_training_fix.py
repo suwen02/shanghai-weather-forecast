@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""把 NWP-aware 训练协议增量应用到现有 WeatherPipeline。"""
+"""把 lead-aware Previous Runs 训练协议增量应用到现有 WeatherPipeline。"""
 
 from pathlib import Path
 
@@ -33,35 +33,35 @@ def patch_pipeline(text: str) -> str:
         "        results.update(station_files)\n",
         "        station_files = collect_station_history(station_years)\n"
         "        results.update(station_files)\n\n"
-        "        forecast_path = collect_training_forecasts(years)\n"
-        "        if forecast_path is not None:\n"
-        "            results[\"historical_forecasts\"] = str(forecast_path)\n",
-        "pipeline historical NWP collection",
+        "        previous_runs_path = collect_training_forecasts(years)\n"
+        "        if previous_runs_path is not None:\n"
+        "            results[\"historical_previous_runs\"] = str(previous_runs_path)\n",
+        "pipeline Previous Runs collection",
     )
     text = replace_once(
         text,
         "        df, feature_cols, temp_target, precip_target = self.engineer.build_training_features(\n"
         "            historical\n"
         "        )\n",
-        "        forecast_files = sorted(\n"
-        "            RAW_DIR.glob(\"historical_forecasts_*.parquet\"),\n"
+        "        previous_run_files = sorted(\n"
+        "            RAW_DIR.glob(\"historical_previous_runs_*.parquet\"),\n"
         "            key=lambda p: p.stat().st_mtime,\n"
         "            reverse=True,\n"
         "        )\n"
-        "        if not forecast_files:\n"
+        "        if not previous_run_files:\n"
         "            raise FileNotFoundError(\n"
-        "                \"未找到历史 NWP 预报训练数据；请先运行 init 或 collect_training_forecasts\"\n"
+        "                \"未找到固定提前量 Previous Runs 训练数据；请先运行 init 或 collect_training_forecasts\"\n"
         "            )\n"
-        "        forecast_path = forecast_files[0]\n"
-        "        historical_forecasts = pd.read_parquet(forecast_path)\n"
+        "        previous_runs_path = previous_run_files[0]\n"
+        "        previous_runs = pd.read_parquet(previous_runs_path)\n"
         "        df, feature_cols, temp_target, precip_target = self.engineer.build_training_features(\n"
-        "            historical, historical_forecasts\n"
+        "            historical, previous_runs\n"
         "        )\n"
         "        if not self.engineer.has_nwp_training_features(feature_cols):\n"
         "            raise RuntimeError(\n"
-        "                \"训练特征缺少 NWP 共识列，拒绝生成 legacy 模型\"\n"
+        "                \"训练特征必须包含 forecast_lead_days 与 NWP 共识列，拒绝生成 legacy 模型\"\n"
         "            )\n",
-        "pipeline NWP training features",
+        "pipeline Previous Runs training features",
     )
     return text
 
@@ -74,7 +74,7 @@ def apply(project: Path) -> None:
 
     text = pipeline_path.read_text(encoding="utf-8")
     pipeline_path.write_text(patch_pipeline(text), encoding="utf-8")
-    print(f"已应用 NWP-aware 训练协议: {pipeline_path}")
+    print(f"已应用 lead-aware Previous Runs 训练协议: {pipeline_path}")
 
 
 if __name__ == "__main__":
