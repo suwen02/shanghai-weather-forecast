@@ -1,4 +1,4 @@
-# NWP Training Protocol and Forecast Divergence Design
+# Lead-Aware NWP Training and Forecast Divergence Design
 
 ## Goal
 
@@ -6,37 +6,79 @@ Fix the production defect where all seven forecast days collapse to nearly ident
 
 ## Root cause
 
-Production evidence shows that current deterministic and ensemble NWP forecasts are fetched successfully for each refresh, and `prediction_frame.py` constructs future rows from those forecast dates. However, training still derives `feature_cols` only from historical observation rows. The NWP consensus columns therefore never enter `TemperaturePredictor.feature_names` or `PrecipitationPredictor.feature_names`; at inference time `_align_features()` silently drops those forecast-varying columns. The remaining lag/rolling state is copied from the latest observed day to every future row, so the model sees nearly identical inputs for all seven dates.
+Production logs prove that current deterministic and ensemble NWP forecasts are fetched successfully on each refresh. The defect occurs after collection:
 
-## Architecture
+1. The legacy model was trained only on observation-derived temporal, lag and rolling features, so live `*_model_*` NWP consensus columns were absent from the saved model `feature_names` and were silently discarded by `_align_features()`.
+2. Future prediction rows carried the same latest observed state into every future date. Without trained NWP inputs and an explicit horizon feature, the seven model inputs were nearly identical.
+3. A first proposed historical source (`Historical Forecast API`) was rejected after checking current Open-Meteo documentation: that API stitches the first hours of successive runs and therefore does not preserve the fixed 1–7 day lead semantics needed here.
 
-1. Build historical NWP consensus features using the exact same feature names as live inference (`FeatureEngineer.build_model_consensus_features`).
-2. Persist historical forecast data and merge its consensus features into historical observation rows before training feature selection.
-3. Require training to contain a minimum set of forecast-source features; fail loudly instead of silently training an observation-only model.
-4. Keep state features causal: lag/rolling features may be carried forward from the latest observation, but current/future NWP features are merged by target date and must retain their daily variation.
-5. Add a fallback daily forecast surface based on current NWP consensus if a legacy model without NWP feature names is loaded, rather than presenting seven identical ML values as if they were current predictions.
+## Correct historical source
 
-## Data flow
+Use Open-Meteo **Previous Runs API**. It exposes `_previous_day1` through `_previous_day7`, where each value was forecast exactly 24, 48, ... 168 hours before its valid time. Most models are archived from January 2024. This directly matches the operational seven-day correction problem.
 
-Historical training:
-`historical observations + historical NWP forecasts -> daily NWP consensus -> time merge -> temporal/lag/rolling features -> feature selection -> train/calibrate/save`
+For each model and valid local date:
 
-Live inference:
-`latest observed-state features + current deterministic consensus + ensemble + spatial -> future scaffold by forecast date -> align to trained NWP-aware feature_names -> predict/calibrate -> JSON`
+- request hourly `temperature_2m_previous_dayN` and `precipitation_previous_dayN` for N=1..7;
+- aggregate hourly temperature to daily max/min/mean and precipitation to daily sum;
+- retain `forecast_lead_days=N` and `model`;
+- aggregate across models using the same `FeatureEngineer.build_model_consensus_features` naming used online.
 
-## Compatibility
+## Training order — leakage guard
 
-Existing model artifacts remain loadable. A model is considered legacy when none of its feature names match the NWP consensus feature family (`*_model_mean`, `*_model_std`, `*_model_min`, `*_model_max`, `*_model_range`, `*_model_count`). The worker must expose this state in metadata and use the NWP fallback until a newly trained artifact is deployed.
+Observation lag/rolling features MUST be computed **before** lead expansion.
+
+Correct order:
+
+`unique observation dates -> temporal/physical/lag/rolling state -> Previous Runs consensus by valid date + lead -> duplicate already-built observation rows for lead1..lead7 -> merge NWP -> train`
+
+Incorrect order:
+
+`duplicate observation rows by lead -> shift/rolling`
+
+The incorrect order would make `.shift()` traverse duplicate lead rows rather than prior days and would corrupt causal state features.
+
+Each training row therefore represents:
+
+`(verifying_date, forecast_lead_days, causal_observation_state, fixed-lead_NWP_consensus) -> verifying_observation_target`
+
+The target is the same verifying observation for all available lead rows of a date, while NWP inputs and `forecast_lead_days` differ.
+
+## Live inference
+
+1. Fetch current deterministic NWP, ensemble and spatial forecasts.
+2. Compute recent observation state only through yesterday.
+3. Use current future NWP dates as the primary scaffold.
+4. Carry only historical state values forward; never overwrite future NWP columns.
+5. Add `forecast_lead_days` from the day difference between the latest observed date and each target date.
+6. Recompute target-date temporal/seasonal features after the scaffold is created.
+7. Align to the saved NWP-aware model feature names, predict, then calibrate.
+
+## Legacy artifact safety
+
+A model is NWP-aware only when its feature names contain both:
+
+- `forecast_lead_days`; and
+- at least one `*_model_*` consensus feature.
+
+If either temperature or precipitation artifact is legacy, the worker must not publish its repeated ML output as if it were current. Instead it publishes the current deterministic multi-model NWP consensus as an explicitly uncalibrated fallback (`source=nwp_consensus_fallback`, `calibrated=false`) until retraining is completed.
+
+## Data availability
+
+Previous Runs training data is capped at 2024-01-01 even if the observation archive is longer. The full observation history is still loaded first so lags/rolling values at the start of the NWP archive have valid causal context; only after feature construction are rows inner-joined to the available fixed-lead NWP dates.
 
 ## UI companion change
 
-The visible forecast page should keep the perforated-paper motif only as an outer decorative layer. Every text-bearing region—header labels, forecast-day cards, explanatory copy, metrics and badges—gets an opaque solid-color surface so punch holes never appear underneath glyphs. This UI source currently exists only in the CLI-deployed Vercel source tree and is not present on the public GitHub branch, so the code-level UI change must be applied when the deployment source or Yorushika host becomes available.
+Keep the perforated-paper motif only outside content surfaces. Every element containing readable text—forecast cards, headings, labels, explanatory text, badges, metrics, buttons—must have an opaque solid background with no punch-hole/background pattern underneath the glyph bounding box. Punch holes may remain on decorative left/right margins or pseudo-elements outside the text surface.
+
+The actual UI source is not present in the public repository. The current Vercel project was CLI-deployed from an unpushed source tree, and the host connector is unavailable in this session. Therefore the model/data fix is implemented and tested in GitHub; the UI change remains a deployment-source patch and must not be falsely reported as applied until that source is accessible.
 
 ## Validation
 
-- Unit test: historical NWP values that vary by date produce varying training consensus columns.
-- Unit test: training feature selection contains NWP consensus feature names.
-- Unit test: future scaffold keeps different NWP values for different dates while state columns remain causal.
-- Regression test: a synthetic NWP-aware predictor receives at least two non-identical rows for a 7-day forecast.
-- Production smoke test: refresh output contains seven distinct dates and at least one forecast-varying model input/output metric; metadata states `nwp_training_aware=true`.
-- UI visual test: no perforation is visible behind any text bounding box.
+- Previous Runs parser test: hourly `_previous_dayN` fields aggregate to daily rows keyed by valid date, lead and model.
+- Lead consensus test: lead1 and lead2 for the same valid date preserve different NWP values.
+- Causality test: observation lag values are computed once and remain unchanged when the row is expanded across leads.
+- Live scaffold test: seven future dates carry lead values 1..7 and retain date-varying NWP values while state features remain causal.
+- Pipeline compile test: integrated `src/pipeline.py` compiles on Python 3.12.
+- Legacy safety: old artifacts route to NWP consensus fallback instead of the repeated ML path.
+- Production smoke test after deployment: seven distinct dates, distinct upstream NWP values where models differ, and either `nwp_training_aware=true` (retrained model) or `source=nwp_consensus_fallback` (legacy-safe mode).
+- UI visual test after source access: no perforation is visible under text at desktop and mobile widths.
