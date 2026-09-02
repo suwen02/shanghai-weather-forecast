@@ -1,34 +1,57 @@
 # -*- coding: utf-8 -*-
-"""在现有 FeatureEngineer 上叠加历史 NWP 共识训练特征。"""
+"""在现有 FeatureEngineer 上叠加固定提前量 NWP 训练特征。"""
 
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from features.engineer import FeatureEngineer
-from features.nwp_training import merge_historical_nwp_features
+from features.nwp_training import (
+    build_lead_consensus_features,
+    expand_observation_features_by_lead,
+)
 from features.prediction_frame import build_forecast_scaffold
 
 
 class NwpAwareFeatureEngineer(FeatureEngineer):
-    """保证训练和在线推理使用同名的 NWP 共识特征。"""
+    """保证训练和在线推理使用同名、同提前量语义的 NWP 共识特征。"""
 
     _base_engineer_type = FeatureEngineer
 
     def build_training_features(
         self,
         historical_daily: pd.DataFrame,
-        historical_forecasts: Optional[pd.DataFrame] = None,
+        previous_runs: Optional[pd.DataFrame] = None,
     ):
-        if historical_forecasts is None:
-            historical_forecasts = pd.DataFrame()
-
-        merged = merge_historical_nwp_features(
-            historical_daily,
-            historical_forecasts,
-            self.build_model_consensus_features,
+        # 关键顺序：先在唯一的观测日期序列上计算 lag/rolling，
+        # 再把每个 valid date 展开成 lead1..lead7，避免 shift 落到重复 lead 行上。
+        observation_features, base_cols, temp_target, precip_target = (
+            self._base_engineer_type.build_training_features(self, historical_daily)
         )
-        return self._base_engineer_type.build_training_features(self, merged)
+        if previous_runs is None or previous_runs.empty:
+            self.feature_cols = list(base_cols)
+            return observation_features, list(base_cols), temp_target, precip_target
+
+        lead_consensus = build_lead_consensus_features(previous_runs)
+        expanded = expand_observation_features_by_lead(
+            observation_features,
+            lead_consensus,
+        )
+        if expanded.empty:
+            self.feature_cols = list(base_cols)
+            return expanded, list(base_cols), temp_target, precip_target
+
+        nwp_cols = [
+            col for col in lead_consensus.columns
+            if col != "time"
+            and col not in {temp_target, precip_target}
+            and lead_consensus[col].dtype in [np.float64, np.int64, float, int]
+        ]
+        feature_cols = list(dict.fromkeys([*base_cols, *nwp_cols]))
+        feature_cols = [c for c in feature_cols if c in expanded.columns and expanded[c].notna().any()]
+        self.feature_cols = feature_cols
+        return expanded, feature_cols, temp_target, precip_target
 
     def build_prediction_features(
         self,
@@ -37,7 +60,7 @@ class NwpAwareFeatureEngineer(FeatureEngineer):
         station_df: pd.DataFrame,
         recent_history: pd.DataFrame,
     ) -> pd.DataFrame:
-        """以未来 NWP 日期为预测主表，并重新计算未来目标日的日历特征。"""
+        """以未来 NWP 日期为预测主表，并重新计算目标日时间特征。"""
         base = recent_history.copy()
         if "time" not in base.columns:
             return pd.DataFrame()
@@ -78,4 +101,5 @@ class NwpAwareFeatureEngineer(FeatureEngineer):
 
     @staticmethod
     def has_nwp_training_features(feature_cols) -> bool:
-        return any("_model_" in name for name in feature_cols)
+        names = set(feature_cols)
+        return "forecast_lead_days" in names and any("_model_" in name for name in names)
