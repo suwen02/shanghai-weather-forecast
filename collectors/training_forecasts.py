@@ -23,7 +23,8 @@ DEFAULT_TRAINING_MODELS: tuple[str, ...] = (
     "icon_seamless",
     "jma_seamless",
 )
-DEFAULT_LEAD_DAYS: tuple[int, ...] = tuple(range(1, 8))
+# 页面当前展示“今天 + 后 6 天”，因此训练 horizon 与 UI 对齐为 day0..day6。
+DEFAULT_LEAD_DAYS: tuple[int, ...] = tuple(range(0, 7))
 
 
 def _previous_run_variables(lead_days: Iterable[int]) -> list[str]:
@@ -105,7 +106,7 @@ def collect_training_forecasts(
     lat: float = SHANGHAI_LAT,
     lon: float = SHANGHAI_LON,
 ) -> Optional[Path]:
-    """采集固定 1–7 天提前量的 Previous Runs 并保存为 parquet。"""
+    """采集固定 day0–day6 Previous Runs 并保存为 parquet。"""
     years = years or ML_CONFIG.historical_years
     models = tuple(models or DEFAULT_TRAINING_MODELS)
     end_date = date.today() - timedelta(days=1)
