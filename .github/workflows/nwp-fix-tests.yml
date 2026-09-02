@@ -43,4 +43,5 @@ jobs:
             features/prediction_frame.py \
             collectors/training_forecasts.py \
             src/train_nwp_models.py \
+            src/pipeline.py \
             scripts/apply_nwp_training_fix.py
