@@ -1,7 +1,10 @@
+import numpy as np
 import pandas as pd
 
 from evaluation.candidate_protocol import (
+    apply_feature_medians,
     build_previous_runs_baseline,
+    fit_feature_medians,
     ml_promotion_gate,
     temporal_date_holdout,
 )
@@ -24,6 +27,20 @@ def test_temporal_holdout_keeps_all_leads_of_a_date_together():
         pd.Timestamp("2026-01-06").date(),
     ]
     assert holdout.groupby("time")["forecast_lead_days"].nunique().tolist() == [3, 3]
+
+
+def test_train_fitted_medians_are_reused_for_holdout_without_leakage():
+    train = pd.DataFrame({"a": [1.0, np.nan, 3.0], "b": [np.nan, np.nan, np.nan]})
+    holdout = pd.DataFrame({"a": [np.nan, 1000.0], "b": [np.nan, 8.0]})
+
+    medians = fit_feature_medians(train, ["a", "b"])
+    train_filled = apply_feature_medians(train, ["a", "b"], medians)
+    holdout_filled = apply_feature_medians(holdout, ["a", "b"], medians)
+
+    assert medians == {"a": 2.0, "b": 0.0}
+    assert train_filled["a"].tolist() == [1.0, 2.0, 3.0]
+    assert holdout_filled["a"].tolist() == [2.0, 1000.0]
+    assert holdout_filled["b"].tolist() == [0.0, 8.0]
 
 
 def test_previous_runs_baseline_uses_model_mean_temperature_and_wet_frequency():
