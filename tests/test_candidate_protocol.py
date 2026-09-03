@@ -6,6 +6,7 @@ from evaluation.candidate_protocol import (
     build_previous_runs_baseline,
     fit_feature_medians,
     ml_promotion_gate,
+    score_candidate_holdout,
     temporal_date_holdout,
 )
 
@@ -62,6 +63,40 @@ def test_previous_runs_baseline_uses_model_mean_temperature_and_wet_frequency():
     second = baseline.iloc[1]
     assert second["temperature_baseline"] == 21.0
     assert second["p_wet_baseline"] == 0.0
+
+
+def test_score_candidate_holdout_reports_aggregate_and_per_lead_metrics():
+    scored = pd.DataFrame(
+        [
+            {
+                "forecast_lead_days": 0,
+                "temperature_actual": 10.0,
+                "precipitation_actual": 0.0,
+                "temperature_candidate": 11.0,
+                "p_wet_candidate": 0.2,
+                "temperature_baseline": 12.0,
+                "p_wet_baseline": 0.5,
+            },
+            {
+                "forecast_lead_days": 1,
+                "temperature_actual": 20.0,
+                "precipitation_actual": 2.0,
+                "temperature_candidate": 19.0,
+                "p_wet_candidate": 0.8,
+                "temperature_baseline": 18.0,
+                "p_wet_baseline": 0.5,
+            },
+        ]
+    )
+
+    result = score_candidate_holdout(scored, wet_threshold_mm=1.0)
+
+    assert result["candidate"]["temperature_mae"] == 1.0
+    assert result["candidate"]["wet_brier"] == 0.04
+    assert result["baseline"]["temperature_mae"] == 2.0
+    assert result["baseline"]["wet_brier"] == 0.25
+    assert result["candidate"]["by_lead"][0] == {"temperature_mae": 1.0, "wet_brier": 0.04, "n": 1}
+    assert result["baseline"]["by_lead"][1] == {"temperature_mae": 2.0, "wet_brier": 0.25, "n": 1}
 
 
 def test_ml_promotion_gate_requires_both_metrics_and_guards_each_lead():
