@@ -11,6 +11,7 @@ on:
       - "collectors/**"
       - "config/**"
       - "evaluation/**"
+      - "models/**"
       - "persistence/**"
       - "src/**"
       - "scripts/**"
@@ -30,7 +31,7 @@ jobs:
       - name: Install focused test dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests pytest
+          pip install pandas numpy requests pytest scikit-learn
       - name: Run regression tests
         run: |
           pytest \
@@ -48,10 +49,12 @@ jobs:
             tests/test_forecast_run_persistence.py \
             tests/test_verification_truth.py \
             tests/test_calibration_readiness.py \
+            tests/test_precipitation_semantics.py \
             -q
       - name: Compile changed modules
         run: |
           python -m py_compile \
+            config/settings.py \
             features/nwp_training.py \
             features/nwp_aware_engineer.py \
             features/prediction_frame.py \
@@ -63,6 +66,7 @@ jobs:
             collectors/verification_truth.py \
             evaluation/weather_metrics.py \
             evaluation/calibration_readiness.py \
+            models/precipitation.py \
             persistence/forecast_runs.py \
             src/train_nwp_models.py \
             src/pipeline.py \
