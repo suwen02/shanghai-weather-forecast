@@ -50,11 +50,13 @@ jobs:
             tests/test_verification_truth.py \
             tests/test_calibration_readiness.py \
             tests/test_precipitation_semantics.py \
+            tests/test_candidate_protocol.py \
             -q
       - name: Compile changed modules
         run: |
           python -m py_compile \
             config/settings.py \
+            config/precipitation_thresholds.py \
             features/nwp_training.py \
             features/nwp_aware_engineer.py \
             features/prediction_frame.py \
@@ -66,6 +68,7 @@ jobs:
             collectors/verification_truth.py \
             evaluation/weather_metrics.py \
             evaluation/calibration_readiness.py \
+            evaluation/candidate_protocol.py \
             models/precipitation.py \
             persistence/forecast_runs.py \
             src/train_nwp_models.py \
