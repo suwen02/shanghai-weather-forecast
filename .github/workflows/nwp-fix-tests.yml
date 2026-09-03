@@ -41,6 +41,7 @@ jobs:
             tests/test_apply_nwp_training_fix.py \
             tests/test_weather_condition.py \
             tests/test_condition_collector.py \
+            tests/test_condition_pipeline_contract.py \
             tests/test_weather_metrics.py \
             -q
       - name: Compile changed modules
