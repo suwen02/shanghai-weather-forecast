@@ -46,6 +46,7 @@ jobs:
             tests/test_weather_metrics.py \
             tests/test_history_window.py \
             tests/test_forecast_run_persistence.py \
+            tests/test_verification_truth.py \
             -q
       - name: Compile changed modules
         run: |
@@ -58,6 +59,7 @@ jobs:
             features/history_window.py \
             collectors/condition_forecasts.py \
             collectors/training_forecasts.py \
+            collectors/verification_truth.py \
             evaluation/weather_metrics.py \
             persistence/forecast_runs.py \
             src/train_nwp_models.py \
