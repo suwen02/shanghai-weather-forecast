@@ -70,3 +70,44 @@ def test_fallback_derives_temperature_center_when_model_mean_is_nan():
     )
 
     assert output["temperature"][0]["median"] == 32.0
+
+
+def test_fallback_publishes_dominant_condition_and_separate_rain_events():
+    target = pd.Timestamp("2026-09-03")
+    consensus = pd.DataFrame({
+        "time": [target],
+        "tmax_max_model_mean": [30.0],
+        "tmax_max_model_std": [1.0],
+        "tmax_max_model_min": [29.0],
+        "tmax_max_model_max": [31.0],
+        "precip_model_mean": [1.5],
+        "precip_model_std": [0.5],
+    })
+    det = pd.DataFrame({
+        "time": [target] * 5,
+        "model": ["cma", "ecmwf", "gfs", "icon", "jma"],
+        "weather_code": [61, 61, 80, 3, 3],
+        "cloud_cover_mean": [88, 92, 84, 90, 86],
+        "precipitation_hours": [2, 3, 1, 0, 0],
+        "precipitation_sum": [0.0, 0.2, 1.2, 4.0, 12.0],
+    })
+
+    output = build_nwp_consensus_fallback(
+        det_df=det,
+        consensus=consensus,
+        report_date=date(2026, 9, 3),
+        horizon=1,
+        precipitation_threshold=0.1,
+        city_name="上海",
+        city_name_en="Shanghai",
+        generated_at="2026-09-03 12:00:00",
+    )
+
+    condition = output["conditions"][0]
+    precip = output["precipitation"][0]
+    assert condition["kind"] == "cloudy"
+    assert condition["secondary"] == "showers"
+    assert precip["p_trace"] == 0.8
+    assert precip["p_wet"] == 0.6
+    assert precip["p_heavy"] == 0.2
+    assert precip["params"]["p_rain_occurrence"] == 0.6
