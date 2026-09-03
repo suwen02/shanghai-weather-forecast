@@ -47,6 +47,21 @@ def test_brief_showers_do_not_turn_cloudy_day_into_rain_primary():
     assert 0.0 <= condition["model_agreement"] <= 1.0
 
 
+def test_primary_weather_code_represents_dominant_kind_not_severe_raw_mode():
+    det = _rows(
+        weather_code=[61, 61, 61, 2, 3],
+        cloud_cover_mean=[90, 92, 88, 85, 87],
+        precipitation_hours=[1, 2, 1, 0, 0],
+        precipitation_sum=[0.2, 0.3, 0.4, 0.0, 0.0],
+    )
+
+    condition = summarize_daily_condition(det, pd.Timestamp("2026-09-03"))
+
+    assert condition["kind"] == "cloudy"
+    assert condition["weather_code"] == 3
+    assert condition["source_weather_code"] == 61
+
+
 def test_sustained_material_rain_is_rain_primary():
     det = _rows(
         weather_code=[61, 63, 80, 61, 63],
