@@ -1,14 +1,32 @@
 # -*- coding: utf-8 -*-
-"""Adapters for verified historical weather truth."""
+"""Collect and normalize verified historical weather truth."""
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List
 
 import pandas as pd
 
+from config.settings import (
+    API_ENDPOINTS,
+    SHANGHAI_LAT,
+    SHANGHAI_LON,
+    TIMEZONE,
+)
+from collectors.open_meteo import OpenMeteoCollector
 from features.weather_condition import classify_model_condition
+
+
+VERIFICATION_DAILY_VARIABLES = (
+    "weather_code",
+    "cloud_cover_mean",
+    "precipitation_hours",
+    "precipitation_sum",
+    "temperature_2m_max",
+    "temperature_2m_min",
+    "temperature_2m_mean",
+)
 
 
 def ensure_past_date(valid_date: date, *, today: date | None = None) -> date:
@@ -79,3 +97,34 @@ def daily_to_verification_rows(
         )
 
     return rows
+
+
+def collect_verification_truth(
+    valid_date: date,
+    *,
+    location: str = "shanghai",
+    observed_at: datetime | str | None = None,
+    today: date | None = None,
+    collector=None,
+    lat: float = SHANGHAI_LAT,
+    lon: float = SHANGHAI_LON,
+) -> List[Dict[str, Any]]:
+    """Fetch one completed day from Open-Meteo Archive and normalize it."""
+    valid_date = ensure_past_date(valid_date, today=today)
+    client = collector or OpenMeteoCollector()
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": valid_date.isoformat(),
+        "end_date": valid_date.isoformat(),
+        "daily": ",".join(VERIFICATION_DAILY_VARIABLES),
+        "timezone": TIMEZONE,
+    }
+    data = client._get(API_ENDPOINTS["archive"], params)
+    daily = pd.DataFrame(data.get("daily") or {})
+    timestamp = observed_at or datetime.now(timezone.utc)
+    return daily_to_verification_rows(
+        daily,
+        location=location,
+        observed_at=timestamp,
+    )
