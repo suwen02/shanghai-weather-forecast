@@ -11,6 +11,7 @@ on:
       - "collectors/**"
       - "config/**"
       - "evaluation/**"
+      - "persistence/**"
       - "src/**"
       - "scripts/**"
       - "tests/**"
@@ -44,6 +45,7 @@ jobs:
             tests/test_condition_pipeline_contract.py \
             tests/test_weather_metrics.py \
             tests/test_history_window.py \
+            tests/test_forecast_run_persistence.py \
             -q
       - name: Compile changed modules
         run: |
@@ -57,6 +59,7 @@ jobs:
             collectors/condition_forecasts.py \
             collectors/training_forecasts.py \
             evaluation/weather_metrics.py \
+            persistence/forecast_runs.py \
             src/train_nwp_models.py \
             src/pipeline.py \
             scripts/apply_nwp_training_fix.py
