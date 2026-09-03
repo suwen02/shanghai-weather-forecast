@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import pandas as pd
 
@@ -29,6 +29,36 @@ def temporal_date_holdout(frame: pd.DataFrame, *, holdout_days: int) -> tuple[pd
     train = work.loc[~mask].reset_index(drop=True)
     holdout = work.loc[mask].reset_index(drop=True)
     return train, holdout
+
+
+def fit_feature_medians(frame: pd.DataFrame, feature_cols: Sequence[str]) -> dict[str, float]:
+    """Fit deterministic numeric medians on the training slice only."""
+    medians: dict[str, float] = {}
+    for col in feature_cols:
+        if col not in frame.columns:
+            medians[col] = 0.0
+            continue
+        values = pd.to_numeric(frame[col], errors="coerce")
+        median = values.median()
+        medians[col] = 0.0 if pd.isna(median) else float(median)
+    return medians
+
+
+def apply_feature_medians(
+    frame: pd.DataFrame,
+    feature_cols: Sequence[str],
+    medians: Mapping[str, float],
+) -> pd.DataFrame:
+    """Apply train-fitted medians without consulting holdout statistics."""
+    out = frame.copy()
+    for col in feature_cols:
+        if col not in out.columns:
+            out[col] = float(medians.get(col, 0.0))
+            continue
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(
+            float(medians.get(col, 0.0))
+        )
+    return out
 
 
 def build_previous_runs_baseline(
