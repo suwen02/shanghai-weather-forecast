@@ -1,4 +1,4 @@
-from config.settings import DAILY_VARIABLES
+from collectors.open_meteo import DAILY_VARIABLES
 
 
 def test_main_deterministic_collector_includes_condition_signals():
