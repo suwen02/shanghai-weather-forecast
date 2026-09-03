@@ -22,6 +22,7 @@ from config.settings import (
 from collectors.open_meteo import OpenMeteoCollector, collect_training_history
 from collectors.cma_stations import CMAStationCollector, collect_station_history
 from collectors.training_forecasts import collect_training_forecasts
+from features.history_window import required_history_days
 from features.nwp_aware_engineer import NwpAwareFeatureEngineer
 from features.nwp_fallback import build_nwp_consensus_fallback
 from models.temperature import TemperaturePredictor
@@ -192,8 +193,12 @@ class WeatherPipeline:
             self._save_predictions(output, target_date)
             return output
 
-        logger.info("获取近期历史观测...")
-        recent_start = target_date - timedelta(days=max(120, max(ML_CONFIG.rolling_windows)))
+        history_days = required_history_days(
+            ML_CONFIG.lag_days,
+            ML_CONFIG.rolling_windows,
+        )
+        logger.info("获取近期历史观测: %s天...", history_days)
+        recent_start = target_date - timedelta(days=history_days)
         recent_end = target_date - timedelta(days=1)
         recent = self.collector.collect_historical_data(recent_start, recent_end)
         recent_daily = recent.get("daily", pd.DataFrame())
