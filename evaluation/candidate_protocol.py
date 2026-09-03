@@ -101,6 +101,94 @@ def build_previous_runs_baseline(
     return baseline
 
 
+def _score_forecast_columns(
+    frame: pd.DataFrame,
+    *,
+    temperature_col: str,
+    probability_col: str,
+    wet_threshold_mm: float,
+) -> dict:
+    required = {
+        "forecast_lead_days",
+        "temperature_actual",
+        "precipitation_actual",
+        temperature_col,
+        probability_col,
+    }
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(f"holdout frame missing columns: {sorted(missing)}")
+
+    work = frame.copy()
+    numeric_cols = [
+        "forecast_lead_days",
+        "temperature_actual",
+        "precipitation_actual",
+        temperature_col,
+        probability_col,
+    ]
+    for col in numeric_cols:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    work = work.dropna(subset=numeric_cols)
+    if work.empty:
+        raise ValueError("holdout frame has no complete rows to score")
+
+    work[probability_col] = work[probability_col].clip(0.0, 1.0)
+    work["wet_actual"] = (
+        work["precipitation_actual"] >= float(wet_threshold_mm)
+    ).astype(float)
+    work["temperature_abs_error"] = (
+        work[temperature_col] - work["temperature_actual"]
+    ).abs()
+    work["wet_brier_error"] = (
+        work[probability_col] - work["wet_actual"]
+    ) ** 2
+
+    by_lead: dict[int, dict] = {}
+    for lead, group in work.groupby("forecast_lead_days", sort=True):
+        lead_id = int(lead)
+        by_lead[lead_id] = {
+            "temperature_mae": round(float(group["temperature_abs_error"].mean()), 4),
+            "wet_brier": round(float(group["wet_brier_error"].mean()), 4),
+            "n": int(len(group)),
+        }
+
+    return {
+        "temperature_mae": round(float(work["temperature_abs_error"].mean()), 4),
+        "wet_brier": round(float(work["wet_brier_error"].mean()), 4),
+        "n": int(len(work)),
+        "by_lead": by_lead,
+    }
+
+
+def score_candidate_holdout(
+    frame: pd.DataFrame,
+    *,
+    wet_threshold_mm: float = 1.0,
+) -> dict:
+    """Score candidate and raw-NWP baseline on exactly the same holdout rows."""
+    if frame is None or frame.empty:
+        raise ValueError("holdout frame must not be empty")
+
+    candidate = _score_forecast_columns(
+        frame,
+        temperature_col="temperature_candidate",
+        probability_col="p_wet_candidate",
+        wet_threshold_mm=wet_threshold_mm,
+    )
+    baseline = _score_forecast_columns(
+        frame,
+        temperature_col="temperature_baseline",
+        probability_col="p_wet_baseline",
+        wet_threshold_mm=wet_threshold_mm,
+    )
+    return {
+        "candidate": candidate,
+        "baseline": baseline,
+        "wet_threshold_mm": float(wet_threshold_mm),
+    }
+
+
 def ml_promotion_gate(
     candidate: Mapping,
     baseline: Mapping,
