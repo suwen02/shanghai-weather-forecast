@@ -13,6 +13,15 @@ RAIN_CODES = {51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82}
 STORM_CODES = {95, 96, 99}
 SNOW_CODES = {71, 73, 75, 77, 85, 86}
 FOG_CODES = {45, 48}
+CANONICAL_CODES = {
+    "sunny": 0,
+    "partly-cloudy": 2,
+    "cloudy": 3,
+    "fog": 45,
+    "rain": 61,
+    "snow": 71,
+    "storm": 95,
+}
 
 # In a tie, prefer the less severe primary state. Severe states still win when
 # they have a strict plurality through the normal vote count.
@@ -115,7 +124,8 @@ def summarize_daily_condition(det_df: pd.DataFrame, target_time) -> dict:
         return {
             "kind": "partly-cloudy",
             "secondary": None,
-            "weather_code": None,
+            "weather_code": CANONICAL_CODES["partly-cloudy"],
+            "source_weather_code": None,
             "model_agreement": 0.0,
             "cloud_cover_mean": None,
             "model_count": 0,
@@ -133,11 +143,14 @@ def summarize_daily_condition(det_df: pd.DataFrame, target_time) -> dict:
         secondary = "showers"
 
     codes = pd.to_numeric(rows.get("weather_code"), errors="coerce").dropna() if "weather_code" in rows.columns else pd.Series(dtype=float)
-    weather_code = None
+    source_weather_code = None
     if not codes.empty:
         modes = codes.astype(int).mode()
         if not modes.empty:
-            weather_code = int(modes.iloc[0])
+            # When multiple raw codes tie, prefer the more frequent severe code
+            # only as source metadata. The primary published code stays canonical.
+            mode_counts = codes.astype(int).value_counts()
+            source_weather_code = int(mode_counts.index[0])
 
     clouds = pd.to_numeric(rows.get("cloud_cover_mean"), errors="coerce").dropna() if "cloud_cover_mean" in rows.columns else pd.Series(dtype=float)
     cloud_mean = round(float(clouds.mean()), 1) if not clouds.empty else None
@@ -145,7 +158,8 @@ def summarize_daily_condition(det_df: pd.DataFrame, target_time) -> dict:
     return {
         "kind": kind,
         "secondary": secondary,
-        "weather_code": weather_code,
+        "weather_code": CANONICAL_CODES.get(kind),
+        "source_weather_code": source_weather_code,
         "model_agreement": round(max_count / len(kinds), 4),
         "cloud_cover_mean": cloud_mean,
         "model_count": int(len(kinds)),
