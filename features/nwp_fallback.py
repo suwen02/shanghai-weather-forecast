@@ -9,6 +9,11 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from features.weather_condition import (
+    precipitation_event_probabilities,
+    summarize_daily_condition,
+)
+
 
 def _finite_float(value, default: float = 0.0) -> float:
     try:
@@ -52,7 +57,7 @@ def build_nwp_consensus_fallback(
     city_name_en: str,
     generated_at: Optional[str] = None,
 ) -> dict:
-    """把当前多模型共识格式化为明确标注“未校准”的 7 天 fallback。"""
+    """Format multi-model NWP consensus without pretending vote fractions are calibrated."""
     if consensus is None or consensus.empty:
         return {}
 
@@ -76,8 +81,11 @@ def build_nwp_consensus_fallback(
         "source": "nwp_consensus_fallback",
         "calibrated": False,
         "nwp_training_aware": False,
+        "rain_probability_basis": "deterministic_model_event_frequency",
+        "rain_probability_threshold_mm": 1.0,
         "temperature": [],
         "precipitation": [],
+        "conditions": [],
     }
 
     for lead_days, (_, row) in enumerate(current.iterrows(), start=0):
@@ -92,14 +100,14 @@ def build_nwp_consensus_fallback(
         p_mean = max(0.0, _finite_float(row.get("precip_model_mean"), 0.0))
         p_std = max(0.0, _finite_float(row.get("precip_model_std"), 0.0))
 
-        p_rain = 0.0
-        if not raw.empty and "precipitation_sum" in raw.columns:
-            day_raw = raw[raw["time"].dt.normalize() == target_time.normalize()]
-            valid_precip = pd.to_numeric(
-                day_raw["precipitation_sum"], errors="coerce"
-            ).dropna()
-            if len(valid_precip):
-                p_rain = float((valid_precip >= precipitation_threshold).mean())
+        events = precipitation_event_probabilities(raw, target_time)
+        condition = summarize_daily_condition(raw, target_time)
+        condition_row = {
+            "date": target_time.date().isoformat(),
+            "lead_days": lead_days,
+            **condition,
+        }
+        output["conditions"].append(condition_row)
 
         temp_quantiles = {
             "p05": round(min(t_min, center - 1.64 * t_std), 2),
@@ -113,19 +121,30 @@ def build_nwp_consensus_fallback(
             "lead_days": lead_days,
             "median": round(center, 2),
             "quantiles": temp_quantiles,
+            "weather_code": condition.get("weather_code"),
+            "condition_kind": condition.get("kind"),
             "confidence": "un-calibrated",
         })
         output["precipitation"].append({
             "date": target_time.date().isoformat(),
             "lead_days": lead_days,
             "expected_mm": round(p_mean, 2),
+            "p_trace": events["p_trace"],
+            "p_wet": events["p_wet"],
+            "p_heavy": events["p_heavy"],
             "quantiles": {
                 "p25": round(max(0.0, p_mean - 0.67 * p_std), 2),
                 "p50": round(p_mean, 2),
                 "p75": round(max(0.0, p_mean + 0.67 * p_std), 2),
-                "p_rain": round(p_rain, 4),
+                "p_rain": events["p_wet"],
             },
-            "params": {"p_rain_occurrence": round(p_rain, 4)},
+            "params": {
+                "p_rain_occurrence": events["p_wet"],
+                "p_trace": events["p_trace"],
+                "p_heavy": events["p_heavy"],
+            },
+            "weather_code": condition.get("weather_code"),
+            "condition_kind": condition.get("kind"),
             "confidence": "un-calibrated",
         })
 
