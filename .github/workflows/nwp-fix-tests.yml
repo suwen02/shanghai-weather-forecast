@@ -43,6 +43,7 @@ jobs:
             tests/test_condition_collector.py \
             tests/test_condition_pipeline_contract.py \
             tests/test_weather_metrics.py \
+            tests/test_history_window.py \
             -q
       - name: Compile changed modules
         run: |
@@ -52,6 +53,7 @@ jobs:
             features/prediction_frame.py \
             features/nwp_fallback.py \
             features/weather_condition.py \
+            features/history_window.py \
             collectors/condition_forecasts.py \
             collectors/training_forecasts.py \
             evaluation/weather_metrics.py \
