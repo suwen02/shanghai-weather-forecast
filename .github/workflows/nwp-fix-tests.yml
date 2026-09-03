@@ -4,10 +4,12 @@ on:
   push:
     branches:
       - fix/nwp-training-protocol-actual
+      - feat/weather-condition-system
   pull_request:
     paths:
       - "features/**"
       - "collectors/**"
+      - "config/**"
       - "src/**"
       - "scripts/**"
       - "tests/**"
@@ -36,6 +38,7 @@ jobs:
             tests/test_nwp_fallback.py \
             tests/test_causal_features.py \
             tests/test_apply_nwp_training_fix.py \
+            tests/test_weather_condition.py \
             -q
       - name: Compile changed modules
         run: |
@@ -44,6 +47,7 @@ jobs:
             features/nwp_aware_engineer.py \
             features/prediction_frame.py \
             features/nwp_fallback.py \
+            features/weather_condition.py \
             collectors/training_forecasts.py \
             src/train_nwp_models.py \
             src/pipeline.py \
