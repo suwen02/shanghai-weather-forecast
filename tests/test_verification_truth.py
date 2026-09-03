@@ -3,7 +3,11 @@ from datetime import date, datetime, timezone
 import pandas as pd
 import pytest
 
-from collectors.verification_truth import daily_to_verification_rows, ensure_past_date
+from collectors.verification_truth import (
+    collect_verification_truth,
+    daily_to_verification_rows,
+    ensure_past_date,
+)
 
 
 def test_daily_to_verification_rows_uses_observed_daily_values_and_condition_semantics():
@@ -54,3 +58,46 @@ def test_ensure_past_date_rejects_today_and_future():
         ensure_past_date(today, today=today)
     with pytest.raises(ValueError):
         ensure_past_date(date(2026, 9, 4), today=today)
+
+
+class RecordingCollector:
+    def __init__(self):
+        self.calls = []
+
+    def _get(self, url, params):
+        self.calls.append((url, params))
+        return {
+            "daily": {
+                "time": ["2026-09-02"],
+                "weather_code": [61],
+                "cloud_cover_mean": [92.0],
+                "precipitation_hours": [8.0],
+                "precipitation_sum": [6.2],
+                "temperature_2m_max": [29.4],
+                "temperature_2m_min": [24.8],
+                "temperature_2m_mean": [26.7],
+            }
+        }
+
+
+def test_collect_verification_truth_uses_archive_single_day_request():
+    collector = RecordingCollector()
+    observed_at = datetime(2026, 9, 3, 0, 0, tzinfo=timezone.utc)
+
+    rows = collect_verification_truth(
+        date(2026, 9, 2),
+        location="shanghai",
+        observed_at=observed_at,
+        today=date(2026, 9, 3),
+        collector=collector,
+    )
+
+    assert len(collector.calls) == 1
+    url, params = collector.calls[0]
+    assert "archive-api.open-meteo.com" in url
+    assert params["start_date"] == "2026-09-02"
+    assert params["end_date"] == "2026-09-02"
+    assert "weather_code" in params["daily"]
+    assert "cloud_cover_mean" in params["daily"]
+    assert rows[0]["valid_date"] == "2026-09-02"
+    assert rows[0]["observed_condition_kind"] == "rain"
